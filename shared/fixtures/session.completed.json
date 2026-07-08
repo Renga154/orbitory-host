@@ -1,0 +1,20 @@
+{
+  "type": "session.completed",
+  "version": 1,
+  "timestamp": "2026-07-01T10:20:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "summary": {
+      "en": "Fixed the flaky checkout test; all tests pass.",
+      "ja": "不安定だったチェックアウトのテストを修正し、全テストに合格しました。"
+    },
+    "changedFileCount": 2,
+    "testStatus": {
+      "status": "passed",
+      "passedCount": 12,
+      "failedCount": 0,
+      "durationSeconds": 45,
+      "summary": { "en": "All 12 tests passed.", "ja": "12件すべてのテストに合格しました。" }
+    }
+  }
+}

@@ -1,0 +1,437 @@
+{
+  "agents": [
+    {
+      "id": "echo-success",
+      "displayName": "Echo Success (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--exit-code=0", "--delay-ms=150"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "echo-failure",
+      "displayName": "Echo Failure (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--exit-code=1", "--delay-ms=150"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "disabled-echo",
+      "displayName": "Disabled Echo (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js"],
+      "workingDirectory": ".",
+      "enabled": false
+    },
+    {
+      "id": "echo-secrets",
+      "displayName": "Echo Secrets (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--print-secrets", "--delay-ms=300"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "echo-huge",
+      "displayName": "Echo Huge Line (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--huge-line", "--delay-ms=300"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "echo-flood",
+      "displayName": "Echo Flood (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--flood=2500", "--delay-ms=500"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "echo-timeout",
+      "displayName": "Echo Timeout (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--delay-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "demo-terminal-test",
+      "displayName": "Demo Terminal Agent (test)",
+      "command": "node",
+      "args": ["../../scripts/demo-agent.js"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-code-fake",
+      "displayName": "Claude Code (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-code-fake-fail",
+      "displayName": "Claude Code Fail (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--fail", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-code-fake-secrets",
+      "displayName": "Claude Code Secrets (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--print-secrets", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-code-fake-slow",
+      "displayName": "Claude Code Slow (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--delay-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "claude-code-disabled",
+      "displayName": "Claude Code Disabled (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js"],
+      "workingDirectory": ".",
+      "enabled": false
+    },
+    {
+      "id": "claude-code-envtest",
+      "displayName": "Claude Code Env Test (fake)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--print-env-keys", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "envAllowlist": ["PATH", "ORBITORY_ENV_ALLOWED_MARKER"]
+    },
+    {
+      "id": "claude-stream-fake",
+      "displayName": "Claude Code Stream (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-chat",
+      "displayName": "Claude Code Stream Chat (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=8000"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-fail",
+      "displayName": "Claude Code Stream Fail (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--fail", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-crash",
+      "displayName": "Claude Code Stream Crash (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--exit-code=3", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-secrets",
+      "displayName": "Claude Code Stream Secrets (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--print-secrets", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-malformed",
+      "displayName": "Claude Code Stream Malformed (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--malformed-lines", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-permission",
+      "displayName": "Claude Code Stream Permission (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--request-permission", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-permission-timeout",
+      "displayName": "Claude Code Stream Permission Timeout (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--request-permission", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "approvalTimeoutSeconds": 1
+    },
+    {
+      "id": "claude-stream-linger",
+      "displayName": "Claude Code Stream Linger (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "claude-stream-slow",
+      "displayName": "Claude Code Stream Slow (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "claude-stream-stop-late-permission",
+      "displayName": "Claude Code Stream Stop Late Permission (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000", "--permission-on-sigterm"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "approvalTimeoutSeconds": 1
+    },
+    {
+      "id": "claude-stream-timeout-late-permission",
+      "displayName": "Claude Code Stream Timeout Late Permission (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000", "--permission-on-sigterm"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "approvalTimeoutSeconds": 1,
+      "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "claude-stream-wrong-type",
+      "displayName": "Claude Code Stream Wrong AgentType (must be rejected)",
+      "agentType": "codex",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "echo-sandboxed",
+      "displayName": "Echo Sandboxed (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--delay-ms=150"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "sandbox-exec", "required": false, "allowNetwork": false, "allowedWorkingDirectoryOnly": true }
+    },
+    {
+      "id": "echo-sandbox-probe",
+      "displayName": "Echo Sandbox FS Probe (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--probe-fs-writes", "--delay-ms=150"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "sandbox-exec", "required": false, "allowNetwork": false, "allowedWorkingDirectoryOnly": true }
+    },
+    {
+      "id": "echo-restricted",
+      "displayName": "Echo Restricted Process (test fixture)",
+      "command": "node",
+      "args": ["echo-agent.js", "--delay-ms=150"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "restricted-process" }
+    },
+    {
+      "id": "claude-code-fake-sandboxed",
+      "displayName": "Claude Code Sandboxed (fake, test)",
+      "agentType": "claudeCode",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code.js", "--print-secrets", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "sandbox-exec", "required": false, "allowNetwork": false, "allowedWorkingDirectoryOnly": true }
+    },
+    {
+      "id": "sandbox-required-container",
+      "displayName": "Sandbox Required Container (fails closed everywhere)",
+      "command": "node",
+      "args": ["echo-agent.js"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true }
+    },
+    {
+      "id": "codex-fake",
+      "displayName": "Codex (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "codex-fake-fail",
+      "displayName": "Codex Fail (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--fail", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "codex-fake-secrets",
+      "displayName": "Codex Secrets (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--print-secrets", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
+      "id": "codex-fake-slow",
+      "displayName": "Codex Slow (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--delay-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "codex-disabled",
+      "displayName": "Codex Disabled (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js"],
+      "workingDirectory": ".",
+      "enabled": false
+    },
+    {
+      "id": "codex-fake-sandboxed",
+      "displayName": "Codex Sandboxed (fake, test)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--print-secrets", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "sandbox-exec", "required": false, "allowNetwork": false, "allowedWorkingDirectoryOnly": true }
+    },
+    {
+      "id": "codex-envtest",
+      "displayName": "Codex Env Test (fake)",
+      "agentType": "codex",
+      "command": "node",
+      "args": ["../../scripts/fake-codex.js", "--print-env-keys", "--delay-ms=60"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "envAllowlist": ["PATH", "ORBITORY_CODEX_ENV_MARKER"]
+    },
+    {
+      "id": "container-fake",
+      "displayName": "Container Fake (test fixture)",
+      "command": "fake-agent",
+      "args": ["--exit-code=0", "--delay-ms=120"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test", "memoryLimit": "256m", "cpuLimit": "1", "pidsLimit": 64 }
+    },
+    {
+      "id": "container-fake-fail",
+      "displayName": "Container Fake Fail (test fixture)",
+      "command": "fake-agent",
+      "args": ["--exit-code=2", "--delay-ms=120"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test" }
+    },
+    {
+      "id": "container-fake-slow",
+      "displayName": "Container Fake Slow (test fixture)",
+      "command": "fake-agent",
+      "args": ["--delay-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 1,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test" }
+    },
+    {
+      "id": "container-fake-secrets",
+      "displayName": "Container Fake Secrets (test fixture)",
+      "command": "fake-agent",
+      "args": ["--print-secrets", "--delay-ms=120"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test" }
+    },
+    {
+      "id": "container-fake-stoppable",
+      "displayName": "Container Fake Stoppable (test fixture)",
+      "command": "fake-agent",
+      "args": ["--delay-ms=15000"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test" }
+    },
+    {
+      "id": "container-fake-envtest",
+      "displayName": "Container Fake Env Test (test fixture)",
+      "command": "fake-agent",
+      "args": ["--delay-ms=120"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "envAllowlist": ["PATH", "ORBITORY_CONTAINER_ENV_MARKER", "ORBITORY_PAIRING_TOKEN"],
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": false, "image": "orbitory-fake/image:test" }
+    },
+    {
+      "id": "container-net-allowed",
+      "displayName": "Container Network Allowed (test fixture)",
+      "command": "fake-agent",
+      "args": ["--delay-ms=120"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": { "mode": "container", "required": true, "allowNetwork": true, "image": "orbitory-fake/image:test" }
+    }
+  ]
+}

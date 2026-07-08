@@ -1,0 +1,32 @@
+{
+  "type": "audit.event.created",
+  "version": 1,
+  "timestamp": "2026-07-01T10:15:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "event": {
+      "id": "audit_9f2a7c1e4b6d8f30",
+      "version": 1,
+      "timestamp": "2026-07-01T10:15:00.000Z",
+      "type": "approval.required",
+      "severity": "high",
+      "actor": "agent",
+      "hostId": "mac-studio",
+      "sessionId": "session_001",
+      "providerId": "claude-code-disposable",
+      "agentType": "claudeCode",
+      "summary": {
+        "en": "Approval required",
+        "ja": "承認が必要です"
+      },
+      "details": {
+        "actionType": "shell_command",
+        "riskLevel": "high",
+        "affectedFileCount": 3,
+        "recommendation": "ask"
+      },
+      "redactionState": "none",
+      "correlationId": "approval_1a2b3c"
+    }
+  }
+}

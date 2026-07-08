@@ -1,0 +1,65 @@
+{
+  "type": "session.snapshot",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.200Z",
+  "sessionId": null,
+  "payload": {
+    "hosts": [
+      {
+        "id": "host_001",
+        "name": "Ren's Mac mini",
+        "type": "mac",
+        "status": "online",
+        "activeSessionCount": 1,
+        "approvalWaitingCount": 0,
+        "lastSeenAt": "2026-07-01T09:59:55.000Z"
+      }
+    ],
+    "sessions": [
+      {
+        "id": "session_001",
+        "hostId": "host_001",
+        "title": "Fix flaky checkout test",
+        "agentType": "claudeCode",
+        "status": "editing",
+        "currentSummary": {
+          "en": "Editing checkout_test.py to fix a race condition.",
+          "ja": "競合状態を修正するため checkout_test.py を編集しています。"
+        },
+        "changedFileCount": 1,
+        "changedFiles": [
+          {
+            "path": "tests/checkout_test.py",
+            "changeType": "modified",
+            "summary": {
+              "en": "Added explicit wait before assertion.",
+              "ja": "アサーションの前に明示的な待機を追加しました。"
+            },
+            "diffPreview": "@@ -42,6 +42,7 @@\n+    await page.wait_for_selector('.confirmation')\n     assert page.locator('.confirmation').is_visible()"
+          }
+        ],
+        "testStatus": {
+          "status": "notStarted",
+          "passedCount": 0,
+          "failedCount": 0,
+          "durationSeconds": 0,
+          "summary": {
+            "en": "Not run yet.",
+            "ja": "まだ実行されていません。"
+          }
+        },
+        "approvalRequired": false,
+        "approvalRequest": null,
+        "createdAt": "2026-07-01T09:50:00.000Z",
+        "updatedAt": "2026-07-01T09:59:00.000Z",
+        "messages": [],
+        "logs": [],
+        "diffSummary": {
+          "en": "1 file changed.",
+          "ja": "1個のファイルが変更されました。"
+        },
+        "sessionKind": "simulated"
+      }
+    ]
+  }
+}

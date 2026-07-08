@@ -1,0 +1,66 @@
+{
+  "type": "providers.snapshot",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.300Z",
+  "sessionId": null,
+  "payload": {
+    "providers": [
+      {
+        "id": "demo-terminal",
+        "displayName": "Demo Terminal Agent",
+        "agentType": "custom",
+        "enabled": true,
+        "startable": true,
+        "unavailableReason": null,
+        "sandboxMode": "sandbox-exec",
+        "sandboxRequired": false,
+        "sandboxSupported": true,
+        "networkPolicy": "denied",
+        "riskLevel": "low",
+        "warnings": ["reads_not_confined"]
+      },
+      {
+        "id": "container-demo",
+        "displayName": "Container Sandbox Demo",
+        "agentType": "custom",
+        "enabled": true,
+        "startable": true,
+        "unavailableReason": null,
+        "sandboxMode": "container",
+        "sandboxRequired": true,
+        "sandboxSupported": true,
+        "networkPolicy": "denied",
+        "riskLevel": "low",
+        "warnings": []
+      },
+      {
+        "id": "claude-code-disposable",
+        "displayName": "Claude Code Disposable Project",
+        "agentType": "claudeCode",
+        "enabled": false,
+        "startable": false,
+        "unavailableReason": "disabled",
+        "sandboxMode": "container",
+        "sandboxRequired": true,
+        "sandboxSupported": true,
+        "networkPolicy": "denied",
+        "riskLevel": "low",
+        "warnings": ["real_cli_disposable_only"]
+      },
+      {
+        "id": "codex-disposable",
+        "displayName": "Codex Disposable Project",
+        "agentType": "codex",
+        "enabled": true,
+        "startable": false,
+        "unavailableReason": "container_engine_unavailable",
+        "sandboxMode": "container",
+        "sandboxRequired": true,
+        "sandboxSupported": false,
+        "networkPolicy": "denied",
+        "riskLevel": "low",
+        "warnings": ["real_cli_disposable_only", "sandbox_unsupported"]
+      }
+    ]
+  }
+}

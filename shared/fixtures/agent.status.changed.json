@@ -1,0 +1,13 @@
+{
+  "type": "agent.status.changed",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "status": "testing",
+    "currentSummary": {
+      "en": "Running the test suite after applying the fix.",
+      "ja": "修正を適用した後、テストスイートを実行しています。"
+    }
+  }
+}

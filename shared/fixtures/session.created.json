@@ -1,0 +1,21 @@
+{
+  "type": "session.created",
+  "version": 1,
+  "timestamp": "2026-07-01T10:08:01.000Z",
+  "sessionId": "session_002",
+  "payload": {
+    "id": "session_002",
+    "hostId": "host_001",
+    "title": "Fix flaky checkout test",
+    "agentType": "claudeCode",
+    "status": "planning",
+    "currentSummary": {
+      "en": "Starting up and reading the failing test.",
+      "ja": "起動して失敗しているテストを読み込んでいます。"
+    },
+    "changedFileCount": 0,
+    "createdAt": "2026-07-01T10:08:01.000Z",
+    "updatedAt": "2026-07-01T10:08:01.000Z",
+    "sessionKind": "simulated"
+  }
+}

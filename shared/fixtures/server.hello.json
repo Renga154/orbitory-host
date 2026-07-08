@@ -1,0 +1,13 @@
+{
+  "type": "server.hello",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.100Z",
+  "sessionId": null,
+  "payload": {
+    "serverName": "orbitory-host-agent",
+    "serverVersion": "0.4.0",
+    "protocolVersion": 1,
+    "hostId": "host_001",
+    "capabilities": ["chat", "approvals", "diffs", "terminalOutput", "testResults"]
+  }
+}

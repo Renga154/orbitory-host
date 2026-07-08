@@ -1,0 +1,13 @@
+# Dependencies / build output
+node_modules/
+dist/
+.orbitory-pack/
+npm-debug.log*
+
+# Local config
+.env
+orbitory.config.json
+
+# Runtime data (per-device pairing-token store, Phase 8). Contains token HASHES
+# + metadata (never raw tokens), but it is host-local state, not source.
+.orbitory/

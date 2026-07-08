@@ -1,0 +1,13 @@
+{
+  "type": "session.failed",
+  "version": 1,
+  "timestamp": "2026-07-01T10:22:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "reason": {
+      "en": "The agent could not resolve a merge conflict and stopped.",
+      "ja": "エージェントはマージの競合を解決できず、停止しました。"
+    },
+    "changedFileCount": 1
+  }
+}

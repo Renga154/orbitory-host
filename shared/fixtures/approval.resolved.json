@@ -1,0 +1,11 @@
+{
+  "type": "approval.resolved",
+  "version": 1,
+  "timestamp": "2026-07-01T10:06:12.500Z",
+  "sessionId": "session_001",
+  "payload": {
+    "approvalId": "approval_001",
+    "decision": "approve",
+    "resolvedBy": "user"
+  }
+}

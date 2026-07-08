@@ -1,0 +1,10 @@
+{
+  "type": "session.updated",
+  "version": 1,
+  "timestamp": "2026-07-01T10:15:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "changedFileCount": 2,
+    "updatedAt": "2026-07-01T10:15:00.000Z"
+  }
+}

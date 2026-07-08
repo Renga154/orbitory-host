@@ -1,0 +1,33 @@
+{
+  "type": "diff.updated",
+  "version": 1,
+  "timestamp": "2026-07-01T10:14:00.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "changedFileCount": 2,
+    "changedFiles": [
+      {
+        "path": "tests/checkout_test.py",
+        "changeType": "modified",
+        "summary": {
+          "en": "Added explicit wait before assertion.",
+          "ja": "アサーションの前に明示的な待機を追加しました。"
+        },
+        "diffPreview": "@@ -42,6 +42,7 @@\n+    await page.wait_for_selector('.confirmation')\n     assert page.locator('.confirmation').is_visible()"
+      },
+      {
+        "path": "src/components/CheckoutConfirmation.tsx",
+        "changeType": "modified",
+        "summary": {
+          "en": "Fixed render timing of the confirmation banner.",
+          "ja": "確認バナーの描画タイミングを修正しました。"
+        },
+        "diffPreview": "@@ -18,7 +18,7 @@\n-  useEffect(() => setVisible(true), []);\n+  useEffect(() => { setVisible(true); }, [orderId]);"
+      }
+    ],
+    "diffSummary": {
+      "en": "2 files changed.",
+      "ja": "2個のファイルが変更されました。"
+    }
+  }
+}

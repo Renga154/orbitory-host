@@ -1,0 +1,100 @@
+{
+  "agents": [
+    {
+      "id": "demo-terminal",
+      "displayName": "Demo Terminal Agent",
+      "agentType": "custom",
+      "command": "node",
+      "args": ["scripts/demo-agent.js"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "sandbox": {
+        "mode": "sandbox-exec",
+        "required": false,
+        "allowNetwork": false,
+        "allowedWorkingDirectoryOnly": true
+      }
+    },
+    {
+      "id": "container-demo",
+      "displayName": "Container Sandbox Demo",
+      "agentType": "custom",
+      "command": "node",
+      "args": ["-e", "console.log('hello from an Orbitory container sandbox'); require('fs').writeFileSync('/workspace/container-demo.txt', 'written inside the workspace mount')"],
+      "workingDirectory": "../orbitory-container-demo",
+      "enabled": false,
+      "maxRuntimeSeconds": 120,
+      "sandbox": {
+        "mode": "container",
+        "required": true,
+        "engine": "docker",
+        "image": "node:22-alpine",
+        "allowNetwork": false,
+        "memoryLimit": "256m",
+        "cpuLimit": "1",
+        "pidsLimit": 64
+      }
+    },
+    {
+      "id": "claude-code-disposable",
+      "displayName": "Claude Code Disposable Project",
+      "agentType": "claudeCode",
+      "command": "claude",
+      "args": [],
+      "workingDirectory": "../orbitory-sandbox-project",
+      "enabled": false,
+      "maxRuntimeSeconds": 900,
+      "envAllowlist": ["ANTHROPIC_API_KEY"],
+      "sandbox": {
+        "mode": "container",
+        "required": true,
+        "engine": "docker",
+        "image": "orbitory-local/claude-code:latest",
+        "allowNetwork": false,
+        "memoryLimit": "1g",
+        "cpuLimit": "2",
+        "pidsLimit": 256
+      }
+    },
+    {
+      "id": "claude-code-stream",
+      "displayName": "Claude Code (stream, disposable project)",
+      "agentType": "claudeCode",
+      "command": "claude",
+      "args": [],
+      "workingDirectory": "../../orbitory-claude-stream-project",
+      "enabled": false,
+      "io": "stream-json",
+      "maxRuntimeSeconds": 3600,
+      "approvalTimeoutSeconds": 300,
+      "envAllowlist": ["PATH", "HOME"],
+      "sandbox": {
+        "mode": "sandbox-exec",
+        "required": true,
+        "allowNetwork": true,
+        "allowedWorkingDirectoryOnly": true
+      }
+    },
+    {
+      "id": "codex-disposable",
+      "displayName": "Codex Disposable Project",
+      "agentType": "codex",
+      "command": "codex",
+      "args": ["exec"],
+      "workingDirectory": "../orbitory-codex-sandbox-project",
+      "enabled": false,
+      "maxRuntimeSeconds": 900,
+      "envAllowlist": [],
+      "sandbox": {
+        "mode": "container",
+        "required": true,
+        "engine": "docker",
+        "image": "orbitory-local/codex:latest",
+        "allowNetwork": false,
+        "memoryLimit": "1g",
+        "cpuLimit": "2",
+        "pidsLimit": 256
+      }
+    }
+  ]
+}

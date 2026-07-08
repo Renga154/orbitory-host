@@ -1,0 +1,12 @@
+{
+  "type": "session.start",
+  "version": 1,
+  "timestamp": "2026-07-01T10:08:00.000Z",
+  "sessionId": null,
+  "payload": {
+    "hostId": "host_001",
+    "agentType": "claudeCode",
+    "title": "Fix flaky checkout test",
+    "initialPrompt": "Investigate and fix the flaky checkout_test.py failure on main."
+  }
+}

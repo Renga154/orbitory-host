@@ -1,0 +1,12 @@
+{
+  "type": "client.hello",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.000Z",
+  "sessionId": null,
+  "payload": {
+    "token": "orb_live_9f2a7c1e4b6d8f30a91c",
+    "clientName": "Orbitory iOS",
+    "clientVersion": "1.0.0",
+    "platform": "ios"
+  }
+}

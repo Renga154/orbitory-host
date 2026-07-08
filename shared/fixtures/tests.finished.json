@@ -1,0 +1,15 @@
+{
+  "type": "tests.finished",
+  "version": 1,
+  "timestamp": "2026-07-01T10:16:45.000Z",
+  "sessionId": "session_001",
+  "payload": {
+    "testStatus": {
+      "status": "passed",
+      "passedCount": 12,
+      "failedCount": 0,
+      "durationSeconds": 45,
+      "summary": { "en": "All 12 tests passed.", "ja": "12件すべてのテストに合格しました。" }
+    }
+  }
+}

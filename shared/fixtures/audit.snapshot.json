@@ -1,0 +1,98 @@
+{
+  "type": "audit.snapshot",
+  "version": 1,
+  "timestamp": "2026-07-01T10:20:00.500Z",
+  "sessionId": null,
+  "payload": {
+    "events": [
+      {
+        "id": "audit_0001started",
+        "version": 1,
+        "timestamp": "2026-07-01T10:10:00.000Z",
+        "type": "session.started",
+        "severity": "info",
+        "actor": "agent",
+        "hostId": "mac-studio",
+        "sessionId": "session_001",
+        "providerId": null,
+        "agentType": "claudeCode",
+        "summary": null,
+        "details": null,
+        "redactionState": "none",
+        "correlationId": null
+      },
+      {
+        "id": "audit_0002rejected",
+        "version": 1,
+        "timestamp": "2026-07-01T10:11:00.000Z",
+        "type": "provider.start.rejected",
+        "severity": "warning",
+        "actor": "host",
+        "hostId": "mac-studio",
+        "sessionId": null,
+        "providerId": "codex-disposable",
+        "agentType": null,
+        "summary": {
+          "en": "Provider start rejected (container_engine_unavailable)",
+          "ja": "プロバイダーの開始が拒否されました（container_engine_unavailable）"
+        },
+        "details": { "reason": "container_engine_unavailable" },
+        "redactionState": "none",
+        "correlationId": null
+      },
+      {
+        "id": "audit_0003required",
+        "version": 1,
+        "timestamp": "2026-07-01T10:15:00.000Z",
+        "type": "approval.required",
+        "severity": "high",
+        "actor": "agent",
+        "hostId": "mac-studio",
+        "sessionId": "session_001",
+        "providerId": "claude-code-disposable",
+        "agentType": "claudeCode",
+        "summary": { "en": "Approval required", "ja": "承認が必要です" },
+        "details": {
+          "actionType": "shell_command",
+          "riskLevel": "high",
+          "affectedFileCount": 3,
+          "recommendation": "ask"
+        },
+        "redactionState": "none",
+        "correlationId": "approval_1a2b3c"
+      },
+      {
+        "id": "audit_0004approved",
+        "version": 1,
+        "timestamp": "2026-07-01T10:16:00.000Z",
+        "type": "approval.approved",
+        "severity": "info",
+        "actor": "user",
+        "hostId": "mac-studio",
+        "sessionId": "session_001",
+        "providerId": null,
+        "agentType": null,
+        "summary": { "en": "Approved", "ja": "承認済み" },
+        "details": null,
+        "redactionState": "none",
+        "correlationId": "approval_1a2b3c"
+      },
+      {
+        "id": "audit_0005completed",
+        "version": 1,
+        "timestamp": "2026-07-01T10:20:00.000Z",
+        "type": "session.completed",
+        "severity": "info",
+        "actor": "agent",
+        "hostId": "mac-studio",
+        "sessionId": "session_001",
+        "providerId": null,
+        "agentType": null,
+        "summary": null,
+        "details": { "changedFileCount": 2 },
+        "redactionState": "none",
+        "correlationId": null
+      }
+    ]
+  }
+}
