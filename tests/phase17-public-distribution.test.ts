@@ -74,7 +74,7 @@ describe("public npm package metadata", () => {
     assert.equal(packageJson.name, "orbitory-host");
     assert.equal(packageJson.private, undefined);
     assert.equal(packageJson.license, "MIT");
-    assert.deepEqual(packageJson.bin, { "orbitory-host": "./bin/orbitory-host.js" });
+    assert.deepEqual(packageJson.bin, { "orbitory-host": "bin/orbitory-host.js" });
     assert.deepEqual(packageJson.repository, {
       type: "git",
       url: "git+https://github.com/Renga154/orbitory-host.git",

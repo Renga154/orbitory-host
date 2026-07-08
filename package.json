@@ -13,7 +13,7 @@
   },
   "homepage": "https://github.com/Renga154/orbitory-host#readme",
   "bin": {
-    "orbitory-host": "./bin/orbitory-host.js"
+    "orbitory-host": "bin/orbitory-host.js"
   },
   "files": [
     "bin/",
