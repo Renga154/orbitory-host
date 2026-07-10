@@ -25,7 +25,12 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as os from "node:os";
 
-import { agentConfigs, loadProviderDescriptors, type TerminalAgentConfig } from "./agentConfig.js";
+import {
+  agentConfigs,
+  loadProviderDescriptors,
+  refreshAgentConfigs,
+  type TerminalAgentConfig,
+} from "./agentConfig.js";
 import { DEMO_SESSIONS_ENABLED } from "./config.js";
 import {
   APPROVAL_SCRIPTS,
@@ -614,6 +619,7 @@ export class SessionStore extends EventEmitter {
    * `agentConfig.ts` `loadProviderDescriptors` and `docs/security.md` §5.
    */
   getProviderDescriptors(): ProviderDescriptor[] {
+    refreshAgentConfigs();
     return loadProviderDescriptors();
   }
 
@@ -758,6 +764,7 @@ export class SessionStore extends EventEmitter {
 
     let terminalConfig: TerminalAgentConfig | undefined;
     if (providerId !== undefined) {
+      refreshAgentConfigs();
       terminalConfig = agentConfigs.get(providerId);
       if (!terminalConfig) {
         this.emitError(

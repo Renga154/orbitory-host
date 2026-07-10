@@ -16,10 +16,19 @@
 
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import { startTestServer, type TestServer } from "./helpers/testServer.js";
 import { connect, type TestWsClient } from "./helpers/wsClient.js";
-import { loadProviderDescriptors, loadAgentConfigs } from "../src/agentConfig.js";
+import {
+  agentConfigs,
+  loadProviderDescriptors,
+  loadAgentConfigs,
+  refreshAgentConfigs,
+} from "../src/agentConfig.js";
+import { SessionStore } from "../src/sessionStore.js";
 import type { HostInfo, AgentSession, ProviderDescriptor } from "../src/types.js";
 
 const PAIRING_TOKEN = process.env["ORBITORY_PAIRING_TOKEN"];
@@ -138,6 +147,49 @@ describe("loadProviderDescriptors (Phase 6)", () => {
           "warnings",
         ],
       );
+    }
+  });
+});
+
+describe("live provider config refresh", () => {
+  test("an app refresh sees a provider configured after host startup", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-provider-refresh-test-"));
+    const configPath = path.join(tempDir, "orbitory.config.json");
+    const previousConfigPath = process.env["ORBITORY_AGENT_CONFIG_PATH"];
+
+    try {
+      process.env["ORBITORY_AGENT_CONFIG_PATH"] = configPath;
+      refreshAgentConfigs(configPath, agentConfigs);
+      const store = new SessionStore();
+
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          agents: [
+            {
+              id: "codex-local",
+              displayName: "Codex (this project)",
+              agentType: "codex",
+              command: "codex",
+              args: ["exec"],
+              workingDirectory: tempDir,
+              enabled: true,
+            },
+          ],
+        }),
+      );
+
+      const codex = store.getProviderDescriptors().find((provider) => provider.id === "codex-local");
+      assert.equal(codex?.startable, true);
+      assert.equal(codex?.unavailableReason, null);
+    } finally {
+      if (previousConfigPath === undefined) {
+        delete process.env["ORBITORY_AGENT_CONFIG_PATH"];
+      } else {
+        process.env["ORBITORY_AGENT_CONFIG_PATH"] = previousConfigPath;
+        refreshAgentConfigs(previousConfigPath, agentConfigs);
+      }
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

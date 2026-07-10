@@ -8,6 +8,7 @@
 
 import { after, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -33,6 +34,22 @@ function makeProtectedTempDir(): string {
   const dir = fs.mkdtempSync(path.join(protectedRoot, ".tmp-public-host-test-"));
   protectedTempRoots.push(dir);
   return dir;
+}
+
+function makeLoggedInCodexBin(): string {
+  const fakeBin = path.join(makeTempDir(), "bin");
+  fs.mkdirSync(fakeBin);
+  fs.writeFileSync(
+    path.join(fakeBin, "codex"),
+    [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  return fakeBin;
 }
 
 function readPackageJson(): Record<string, unknown> {
@@ -91,18 +108,410 @@ describe("public npm package metadata", () => {
     assert.equal(files.some((entry) => entry.startsWith("../")), false);
   });
 
-  test("bin wrapper defaults to pairing-code printing and demo sessions without adding execution authority", () => {
+  test("bin wrapper defaults to honest live state and makes demo mode explicit", () => {
     const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
     const bin = fs.readFileSync(binPath, "utf8");
 
     assert.match(bin, /^#!\/usr\/bin\/env node/);
     assert.match(bin, /ORBITORY_PRINT_PAIRING_CODE \?\?= "true"/);
-    assert.match(bin, /ORBITORY_DEMO_SESSIONS \?\?= "true"/);
+    assert.match(bin, /--demo/);
+    assert.match(bin, /ORBITORY_DEMO_SESSIONS \?\?= wantsDemo \? "true" : "false"/);
+    assert.match(bin, /--setup/);
+    assert.match(bin, /--init-config/);
     assert.match(bin, /dist\/index\.js/);
     assert.equal(bin.includes("orbitory-dev-token"), false);
     assert.equal(bin.includes("orbitory-test-token"), false);
-    assert.equal(bin.includes("command"), false);
-    assert.equal(bin.includes("args"), false);
+  });
+
+  test("--init-config writes a local starter config and does not require built dist files", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+
+    execFileSync(process.execPath, [binPath, "--init-config"], { cwd, encoding: "utf8" });
+
+    const configPath = path.join(cwd, "orbitory.config.json");
+    assert.equal(fs.existsSync(configPath), true);
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: Array<Record<string, unknown>>;
+    };
+    const demo = config.agents.find((agent) => agent.id === "demo-terminal");
+    const claude = config.agents.find((agent) => agent.id === "claude-code-local");
+    const codex = config.agents.find((agent) => agent.id === "codex-local");
+    assert.equal(demo?.enabled, true);
+    assert.equal(demo?.command, process.execPath);
+    assert.ok(Array.isArray(demo?.args));
+    assert.match(String((demo?.args as string[])[0]), /scripts\/demo-agent\.js$/);
+    assert.equal(claude?.enabled, false);
+    assert.equal(codex?.enabled, false);
+    assert.equal(fs.realpathSync(String(claude?.workingDirectory)), fs.realpathSync(cwd));
+    assert.equal(fs.realpathSync(String(codex?.workingDirectory)), fs.realpathSync(cwd));
+  });
+
+  test("--setup codex --yes writes an enabled provider without manual JSON editing", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = makeLoggedInCodexBin();
+
+    const output = execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+    });
+
+    assert.match(output, /Enabled provider: Codex \(this project\) \(codex-local\)/);
+    assert.match(output, /host is already running, tap Refresh/);
+    assert.match(output, /If no host is running, start it from this folder with `npx orbitory-host@latest`/);
+
+    const configPath = path.join(cwd, "orbitory.config.json");
+    assert.equal(fs.existsSync(configPath), true);
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: Array<Record<string, unknown>>;
+    };
+    assert.equal(config.agents.length, 1);
+    const codex = config.agents[0];
+    assert.equal(codex.id, "codex-local");
+    assert.equal(codex.enabled, true);
+    assert.equal(path.basename(String(codex.command)), "codex");
+    assert.deepEqual(codex.args, ["exec"]);
+    assert.deepEqual(codex.envAllowlist, ["PATH", "HOME", "OPENAI_API_KEY"]);
+    assert.equal(fs.realpathSync(String(codex.workingDirectory)), fs.realpathSync(cwd));
+  });
+
+  test("--setup reports an existing Codex login as ready", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    const fakeCodex = path.join(fakeBin, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then",
+        "  echo \"Logged in using ChatGPT\"",
+        "  exit 0",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const output = execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}:${process.env["PATH"] ?? ""}` },
+    });
+
+    assert.match(output, /Codex login: ready/);
+  });
+
+  test("--setup pins the detected provider executable instead of relying on the host PATH", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    const fakeCodex = path.join(fakeBin, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      "#!/bin/sh\nif [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi\nexit 1\n",
+      { mode: 0o700 },
+    );
+
+    execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}:${process.env["PATH"] ?? ""}` },
+    });
+
+    const config = JSON.parse(fs.readFileSync(path.join(cwd, "orbitory.config.json"), "utf8")) as {
+      agents: Array<{ command: string }>;
+    };
+    assert.equal(config.agents[0]?.command, fakeCodex);
+  });
+
+  test("--setup can complete Codex login with the phone-friendly device flow", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    const stateFile = path.join(fakeBin, "logged-in");
+    const callsFile = path.join(fakeBin, "calls.log");
+    fs.mkdirSync(fakeBin);
+    const fakeCodex = path.join(fakeBin, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        `echo \"$@\" >> \"${callsFile}\"`,
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then",
+        `  test -f \"${stateFile}\"`,
+        "  exit $?",
+        "fi",
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"--device-auth\" ]; then",
+        `  touch \"${stateFile}\"`,
+        "  exit 0",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const output = execFileSync(
+      process.execPath,
+      [binPath, "--setup", "codex", "--yes", "--login-device"],
+      {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${fakeBin}:${process.env["PATH"] ?? ""}` },
+      },
+    );
+
+    assert.match(output, /Starting Codex device login/);
+    assert.match(output, /Codex login: ready/);
+    assert.match(fs.readFileSync(callsFile, "utf8"), /login --device-auth/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), true);
+  });
+
+  test("--setup can complete Claude Code login in the provider's official browser flow", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    const stateFile = path.join(fakeBin, "logged-in");
+    const callsFile = path.join(fakeBin, "calls.log");
+    fs.mkdirSync(fakeBin);
+    const fakeClaude = path.join(fakeBin, "claude");
+    fs.writeFileSync(
+      fakeClaude,
+      [
+        "#!/bin/sh",
+        `echo \"$@\" >> \"${callsFile}\"`,
+        "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then",
+        `  test -f \"${stateFile}\"`,
+        "  exit $?",
+        "fi",
+        "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"login\" ]; then",
+        `  touch \"${stateFile}\"`,
+        "  exit 0",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const output = execFileSync(
+      process.execPath,
+      [binPath, "--setup", "claude", "--yes", "--login-browser"],
+      {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${fakeBin}:${process.env["PATH"] ?? ""}` },
+      },
+    );
+
+    assert.match(output, /Starting Claude Code browser login/);
+    assert.match(output, /Claude Code login: ready/);
+    assert.match(fs.readFileSync(callsFile, "utf8"), /auth login/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), true);
+  });
+
+  test("interactive setup offers phone login without requiring a CLI flag", {
+    skip: process.platform !== "darwin" || !fs.existsSync("/usr/bin/expect"),
+  }, () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    const stateFile = path.join(fakeBin, "logged-in");
+    const callsFile = path.join(fakeBin, "calls.log");
+    fs.mkdirSync(fakeBin);
+    const fakeCodex = path.join(fakeBin, "codex");
+    fs.writeFileSync(
+      fakeCodex,
+      [
+        "#!/bin/sh",
+        `echo \"$@\" >> \"${callsFile}\"`,
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then",
+        `  test -f \"${stateFile}\"`,
+        "  exit $?",
+        "fi",
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"--device-auth\" ]; then",
+        `  touch \"${stateFile}\"`,
+        "  exit 0",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const expectProgram = [
+      "set timeout 10",
+      "spawn $env(ORBITORY_TEST_NODE) $env(ORBITORY_TEST_BIN) --setup codex",
+      "expect {",
+      "  -re {Project folder .*:} { send \"\\r\" }",
+      "  eof { exit 2 }",
+      "  timeout { exit 3 }",
+      "}",
+      "expect {",
+      "  -re {Sign in .*:} { send \"phone\\r\" }",
+      "  eof { exit 4 }",
+      "  timeout { exit 5 }",
+      "}",
+      "expect eof",
+      "set result [wait]",
+      "exit [lindex $result 3]",
+    ].join("\n");
+    const result = spawnSync("expect", ["-c", expectProgram], {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env["PATH"] ?? ""}`,
+        ORBITORY_TEST_NODE: process.execPath,
+        ORBITORY_TEST_BIN: binPath,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(callsFile, "utf8"), /login --device-auth/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), true);
+  });
+
+  test("interactive setup skips the login question when Codex is already authenticated", {
+    skip: process.platform !== "darwin" || !fs.existsSync("/usr/bin/expect"),
+  }, () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(
+      path.join(fakeBin, "codex"),
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const expectProgram = [
+      "set timeout 10",
+      "spawn $env(ORBITORY_TEST_NODE) $env(ORBITORY_TEST_BIN) --setup codex",
+      "expect {",
+      "  -re {Project folder .*:} { send \"\\r\" }",
+      "  eof { exit 2 }",
+      "  timeout { exit 3 }",
+      "}",
+      "expect {",
+      "  -re {Sign in .*:} { exit 6 }",
+      "  -re {Enabled provider: Codex} {}",
+      "  eof { exit 4 }",
+      "  timeout { exit 5 }",
+      "}",
+      "expect eof",
+      "set result [wait]",
+      "exit [lindex $result 3]",
+    ].join("\n");
+    const result = spawnSync("expect", ["-c", expectProgram], {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env["PATH"] ?? ""}`,
+        ORBITORY_TEST_NODE: process.execPath,
+        ORBITORY_TEST_BIN: binPath,
+      },
+    });
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+  });
+
+  test("non-interactive setup refuses to enable an installed but logged-out Codex", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, "codex"), "#!/bin/sh\nexit 1\n", { mode: 0o700 });
+
+    const result = spawnSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}:${process.env["PATH"] ?? ""}` },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /codex login/);
+    assert.match(result.stderr, /codex login --device-auth/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), false);
+  });
+
+  test("setup refuses to enable a real provider whose CLI is not installed", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const result = spawnSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: "/usr/bin:/bin" },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Codex CLI was not found/);
+    assert.match(result.stderr, /developers\.openai\.com\/codex/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), false);
+  });
+
+  test("--setup merges into an existing config by replacing only the selected provider", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = makeLoggedInCodexBin();
+    const configPath = path.join(cwd, "orbitory.config.json");
+    fs.writeFileSync(
+      configPath,
+      `${JSON.stringify({
+        note: "keep me",
+        agents: [
+          {
+            id: "demo-terminal",
+            displayName: "Existing Demo",
+            agentType: "custom",
+            command: process.execPath,
+            args: ["old.js"],
+            workingDirectory: cwd,
+            enabled: true,
+          },
+          {
+            id: "codex-local",
+            displayName: "Old Codex",
+            agentType: "codex",
+            command: "codex",
+            args: ["old"],
+            workingDirectory: cwd,
+            enabled: false,
+          },
+        ],
+      }, null, 2)}\n`,
+    );
+
+    execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+    });
+
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      note: string;
+      agents: Array<Record<string, unknown>>;
+    };
+    assert.equal(config.note, "keep me");
+    assert.equal(config.agents.length, 2);
+    const demo = config.agents.find((agent) => agent.id === "demo-terminal");
+    const codex = config.agents.find((agent) => agent.id === "codex-local");
+    assert.equal(demo?.displayName, "Existing Demo");
+    assert.equal(codex?.displayName, "Codex (this project)");
+    assert.equal(codex?.enabled, true);
+    assert.deepEqual(codex?.args, ["exec"]);
   });
 });
 

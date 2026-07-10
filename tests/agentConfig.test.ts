@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { loadAgentConfigs } from "../src/agentConfig.js";
+import { loadAgentConfigs, refreshAgentConfigs } from "../src/agentConfig.js";
 
 function writeTempConfig(content: unknown): { configPath: string; tempDir: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-agentconfig-test-"));
@@ -146,6 +146,37 @@ describe("loadAgentConfigs", () => {
     });
     const configs = loadAgentConfigs(configPath);
     assert.equal(configs.get("no-display-name")?.displayName, "no-display-name");
+  });
+});
+
+describe("refreshAgentConfigs", () => {
+  test("loads a provider added after the host process started", () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-agentconfig-refresh-test-"));
+    const configPath = path.join(tempDir, "orbitory.config.json");
+    const liveConfigs = new Map();
+
+    assert.equal(refreshAgentConfigs(configPath, liveConfigs), false);
+    assert.equal(liveConfigs.size, 0);
+
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        agents: [
+          {
+            id: "codex-local",
+            displayName: "Codex (this project)",
+            agentType: "codex",
+            command: "codex",
+            args: ["exec"],
+            workingDirectory: tempDir,
+            enabled: true,
+          },
+        ],
+      }),
+    );
+
+    assert.equal(refreshAgentConfigs(configPath, liveConfigs), true);
+    assert.equal(liveConfigs.get("codex-local")?.displayName, "Codex (this project)");
   });
 });
 

@@ -14,7 +14,7 @@ import * as os from "node:os";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 
-import { HELLO_TIMEOUT_MS } from "./config.js";
+import { DEMO_SESSIONS_ENABLED, HELLO_TIMEOUT_MS } from "./config.js";
 import { verifyPresentedToken } from "./auth.js";
 import {
   getAuditStore,
@@ -45,6 +45,10 @@ const SERVER_CAPABILITIES = [
   "testResults",
   "auditLog",
 ];
+
+function serverCapabilities(): string[] {
+  return DEMO_SESSIONS_ENABLED ? [...SERVER_CAPABILITIES, "demoSessions"] : SERVER_CAPABILITIES;
+}
 
 /** WebSocket close code used for authentication failures. */
 const CLOSE_CODE_UNAUTHORIZED = 4401;
@@ -206,7 +210,7 @@ async function handleConnection(
       serverVersion: SERVER_VERSION,
       protocolVersion: 1 as const,
       hostId: os.hostname(),
-      capabilities: SERVER_CAPABILITIES,
+      capabilities: serverCapabilities(),
     }),
   );
 

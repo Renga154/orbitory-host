@@ -39,6 +39,7 @@ import { issuePairingCode } from "./pairingIssue.js";
 import { buildServer } from "./server.js";
 import { loadTlsMaterials, type TlsMaterials } from "./tls.js";
 import { SERVER_VERSION } from "./ws.js";
+import { formatStartupError } from "./startupErrors.js";
 
 function printDevPairingTokenReminder(): void {
   const banner = [
@@ -278,6 +279,6 @@ async function renderTerminalQr(text: string): Promise<string | null> {
 }
 
 main().catch((err) => {
-  console.error("[orbitory-host-agent] Fatal error during startup:", err);
+  console.error(formatStartupError(err, TLS_ENABLED ? HTTPS_PORT : PORT));
   process.exitCode = 1;
 });

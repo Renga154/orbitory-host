@@ -766,8 +766,51 @@ export function loadAgentConfigs(configPath: string = defaultConfigPath()): Map<
   return result;
 }
 
-/** The process-wide allowlist, loaded once at import time from the default config path. */
-export const agentConfigs: Map<string, TerminalAgentConfig> = loadAgentConfigs();
+/** The process-wide allowlist used by session starts. Updated in place on host-local config changes. */
+export const agentConfigs: Map<string, TerminalAgentConfig> = new Map();
+
+const configRevisions = new WeakMap<Map<string, TerminalAgentConfig>, string>();
+
+function configRevision(configPath: string): string {
+  const absolutePath = path.resolve(configPath);
+  try {
+    const stat = fs.statSync(absolutePath, { bigint: true });
+    return `${absolutePath}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+  } catch {
+    return `${absolutePath}:missing`;
+  }
+}
+
+/**
+ * Refresh a live allowlist when its host-local config file changes.
+ *
+ * The Map is mutated in place so every existing reference observes the same
+ * validated snapshot. A removed, unreadable, or invalid config therefore
+ * revokes providers instead of leaving stale commands startable.
+ */
+export function refreshAgentConfigs(
+  configPath: string = defaultConfigPath(),
+  target: Map<string, TerminalAgentConfig> = agentConfigs,
+): boolean {
+  const revision = configRevision(configPath);
+  if (configRevisions.get(target) === revision) {
+    return false;
+  }
+
+  const next = loadAgentConfigs(configPath);
+  const changed =
+    target.size !== next.size ||
+    Array.from(next).some(([id, config]) => target.get(id) !== config);
+
+  target.clear();
+  for (const [id, config] of next) {
+    target.set(id, config);
+  }
+  configRevisions.set(target, revision);
+  return changed;
+}
+
+refreshAgentConfigs();
 
 // ---------------------------------------------------------------------------
 // Provider descriptors (Phase 6) — sanitized, read-only views for the client.
