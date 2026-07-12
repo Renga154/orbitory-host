@@ -80,14 +80,29 @@ function waitForEvent(
 }
 
 describe("buildCodexExecArgv", () => {
+  test("allows a host-authorized project that is not a Git repository", () => {
+    assert.deepEqual(buildCodexExecArgv({ args: [] }), [
+      "exec",
+      "--skip-git-repo-check",
+      "--json",
+      "-",
+    ]);
+  });
+
   test("builds the host-authoritative first-turn command", () => {
-    assert.deepEqual(buildCodexExecArgv({ args: [] }), ["exec", "--json", "-"]);
+    assert.deepEqual(buildCodexExecArgv({ args: [] }), [
+      "exec",
+      "--skip-git-repo-check",
+      "--json",
+      "-",
+    ]);
   });
 
   test("builds the host-authoritative resume command", () => {
     assert.deepEqual(buildCodexExecArgv({ args: [] }, "thread-private-123"), [
       "exec",
       "resume",
+      "--skip-git-repo-check",
       "--json",
       "thread-private-123",
       "-",
@@ -102,7 +117,16 @@ describe("buildCodexExecArgv", () => {
         modelId: "gpt-5.5",
         modelCliValue: "gpt-5.5",
       }),
-      ["exec", "--model", "gpt-5.5", "-c", 'sandbox_mode="read-only"', "--json", "-"],
+      [
+        "exec",
+        "--model",
+        "gpt-5.5",
+        "-c",
+        'sandbox_mode="read-only"',
+        "--skip-git-repo-check",
+        "--json",
+        "-",
+      ],
     );
   });
 
@@ -118,6 +142,7 @@ describe("buildCodexExecArgv", () => {
         "resume",
         "-c",
         'sandbox_mode="read-only"',
+        "--skip-git-repo-check",
         "--json",
         "thread-private-123",
         "-",

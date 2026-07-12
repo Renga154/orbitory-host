@@ -26,8 +26,8 @@ process.stdin.on("end", () => {
   const resume = args[0] === "exec" && args[1] === "resume";
   const scenario = args.find((arg) => arg.startsWith("--scenario=")) ?? "--scenario=normal";
   const expected = resume
-    ? ["exec", "resume", scenario, "--json", THREAD_ID, "-"]
-    : ["exec", scenario, "--json", "-"];
+    ? ["exec", "resume", scenario, "--skip-git-repo-check", "--json", THREAD_ID, "-"]
+    : ["exec", scenario, "--skip-git-repo-check", "--json", "-"];
   if (args.length !== expected.length || args.some((arg, index) => arg !== expected[index])) {
     rejectInvocation();
     return;

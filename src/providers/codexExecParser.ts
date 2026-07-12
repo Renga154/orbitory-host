@@ -50,8 +50,17 @@ export function buildCodexExecArgv(
       : []),
   ];
   return threadId === undefined
-    ? ["exec", ...extras, ...selectedArgs, "--json", "-"]
-    : ["exec", "resume", ...extras, ...selectedArgs, "--json", threadId, "-"];
+    ? ["exec", ...extras, ...selectedArgs, "--skip-git-repo-check", "--json", "-"]
+    : [
+        "exec",
+        "resume",
+        ...extras,
+        ...selectedArgs,
+        "--skip-git-repo-check",
+        "--json",
+        threadId,
+        "-",
+      ];
 }
 
 export type CodexExecEvent =
