@@ -5,8 +5,14 @@
   "sessionId": null,
   "payload": {
     "hostId": "host_001",
-    "agentType": "claudeCode",
+    "agentType": "codex",
     "title": "Fix flaky checkout test",
-    "initialPrompt": "Investigate and fix the flaky checkout_test.py failure on main."
+    "initialPrompt": "Investigate and fix the flaky checkout_test.py failure on main.",
+    "providerId": "codex-local",
+    "launchProfileId": "plan",
+    "modelId": "gpt-5.5",
+    "projectId": "project_fixture_001",
+    "resumeId": "resume_fixture_001",
+    "requestId": "start_fixture_001"
   }
 }

@@ -6,6 +6,7 @@
   "payload": {
     "id": "session_002",
     "hostId": "host_001",
+    "requestId": "start_fixture_001",
     "title": "Fix flaky checkout test",
     "agentType": "claudeCode",
     "status": "planning",

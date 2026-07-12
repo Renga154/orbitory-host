@@ -18,6 +18,7 @@ import type { FastifyInstance } from "fastify";
 
 import { setInternalApprovalBaseUrl } from "../../src/approvalBridge.js";
 import { buildServer } from "../../src/server.js";
+import type { ProjectCatalogSnapshotSource } from "../../src/ws.js";
 
 export interface TestServer {
   app: FastifyInstance;
@@ -43,6 +44,7 @@ export interface StartTestServerOptions {
    * what was logged (e.g. that a pairing token never appears in full).
    */
   captureLogs?: boolean;
+  projectCatalog?: ProjectCatalogSnapshotSource;
 }
 
 /**
@@ -56,9 +58,10 @@ export async function startTestServer(
   const logLines: string[] | undefined = options.captureLogs ? [] : undefined;
 
   const app = await buildServer(
-    logLines
-      ? { loggerStream: { write: (msg: string) => logLines.push(msg) } }
-      : {},
+    {
+      ...(logLines ? { loggerStream: { write: (msg: string) => logLines.push(msg) } } : {}),
+      ...(options.projectCatalog ? { projectCatalog: options.projectCatalog } : {}),
+    },
   );
   await app.listen({ port: 0, host: "127.0.0.1" });
 

@@ -81,6 +81,22 @@ function readPairingTtlSeconds(): number {
   return parsed;
 }
 
+function readDeviceTokenTtlSeconds(): number {
+  const DEFAULT_SECONDS = 30 * 24 * 60 * 60;
+  const raw = process.env.ORBITORY_DEVICE_TOKEN_TTL_SECONDS;
+  if (raw === undefined || raw.trim() === "") {
+    return DEFAULT_SECONDS;
+  }
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    console.warn(
+      `[orbitory-host-agent] Ignoring invalid ORBITORY_DEVICE_TOKEN_TTL_SECONDS value "${raw}"; falling back to ${DEFAULT_SECONDS}.`,
+    );
+    return DEFAULT_SECONDS;
+  }
+  return parsed;
+}
+
 function readPairedDevicesPath(): string {
   const raw = process.env.ORBITORY_PAIRED_DEVICES_PATH;
   if (raw !== undefined && raw.trim() !== "") {
@@ -172,6 +188,9 @@ export const PAIRING_TOKEN: string = readPairingToken();
  * `docs/PHASE8_QR_PAIRING_HARDENING.md`.
  */
 export const PAIRING_TTL_SECONDS: number = readPairingTtlSeconds();
+
+/** Sliding lifetime for an activated, profile-bound device credential. */
+export const DEVICE_TOKEN_TTL_SECONDS: number = readDeviceTokenTtlSeconds();
 
 /** Where the per-device pairing-token store is persisted (JSON, hashes only). */
 export const PAIRED_DEVICES_PATH: string = readPairedDevicesPath();

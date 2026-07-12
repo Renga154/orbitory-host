@@ -67,7 +67,7 @@
       "io": "stream-json",
       "maxRuntimeSeconds": 3600,
       "approvalTimeoutSeconds": 300,
-      "envAllowlist": ["PATH", "HOME"],
+      "envAllowlist": ["PATH", "HOME", "USER", "LOGNAME"],
       "sandbox": {
         "mode": "sandbox-exec",
         "required": true,

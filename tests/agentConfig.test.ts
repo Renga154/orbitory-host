@@ -11,7 +11,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { loadAgentConfigs, refreshAgentConfigs } from "../src/agentConfig.js";
+import {
+  loadAgentConfigs,
+  loadCodexHistoryDiscoveryConfig,
+  refreshAgentConfigs,
+} from "../src/agentConfig.js";
 
 function writeTempConfig(content: unknown): { configPath: string; tempDir: string } {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-agentconfig-test-"));
@@ -52,6 +56,57 @@ describe("loadAgentConfigs", () => {
     assert.deepEqual(entry.args, ["--version"]);
     assert.equal(path.isAbsolute(entry.workingDirectory), true);
     assert.equal(entry.workingDirectory, path.resolve(tempDir));
+  });
+
+  test("codex-jsonl is accepted only for a Codex provider", () => {
+    const { configPath } = writeTempConfig({
+      agents: [
+        {
+          id: "codex-jsonl",
+          agentType: "codex",
+          command: "codex",
+          args: [],
+          workingDirectory: ".",
+          enabled: true,
+          io: "codex-jsonl",
+        },
+        {
+          id: "wrong-jsonl",
+          agentType: "custom",
+          command: "node",
+          args: [],
+          workingDirectory: ".",
+          enabled: true,
+          io: "codex-jsonl",
+        },
+      ],
+    });
+    const configs = loadAgentConfigs(configPath);
+    assert.equal(configs.get("codex-jsonl")?.io, "codex-jsonl");
+    assert.equal(configs.has("wrong-jsonl"), false);
+  });
+
+  test("Codex history catalog requires explicit valid opt-in", () => {
+    const { configPath } = writeTempConfig({
+      agents: [],
+      projectCatalog: {
+        codexHistory: { enabled: true, providerId: "codex-jsonl", maxSessions: 75 },
+      },
+    });
+    assert.deepEqual(loadCodexHistoryDiscoveryConfig(configPath), {
+      enabled: true,
+      providerId: "codex-jsonl",
+      additionalProviderIds: [],
+      maxSessions: 75,
+    });
+
+    const disabled = writeTempConfig({
+      agents: [],
+      projectCatalog: {
+        codexHistory: { enabled: false, providerId: "codex-jsonl", maxSessions: 75 },
+      },
+    });
+    assert.equal(loadCodexHistoryDiscoveryConfig(disabled.configPath), undefined);
   });
 
   test("entry with enabled: false is excluded", () => {

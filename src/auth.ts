@@ -15,7 +15,12 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 
-import { PAIRED_DEVICES_PATH, PAIRING_TOKEN, STATIC_TOKEN_ENABLED } from "./config.js";
+import {
+  DEVICE_TOKEN_TTL_SECONDS,
+  PAIRED_DEVICES_PATH,
+  PAIRING_TOKEN,
+  STATIC_TOKEN_ENABLED,
+} from "./config.js";
 import {
   FilePersistence,
   PairedDeviceStore,
@@ -35,6 +40,7 @@ export type AuthResult =
  */
 let pairedDeviceStore = new PairedDeviceStore({
   persistence: new FilePersistence(PAIRED_DEVICES_PATH),
+  deviceTtlSeconds: DEVICE_TOKEN_TTL_SECONDS,
 });
 
 export function getPairedDeviceStore(): PairedDeviceStore {
@@ -62,12 +68,19 @@ function constantTimeEqual(a: string, b: string): boolean {
  * never equal the static token, so there is nothing to fall through to). An
  * unknown/absent token then falls back to the static dev token when enabled.
  */
-export function verifyPresentedToken(token: string | undefined | null): AuthResult {
-  const device = pairedDeviceStore.verify(token);
+export function verifyPresentedToken(
+  token: string | undefined | null,
+  clientId?: string,
+): AuthResult {
+  const device = pairedDeviceStore.verify(token, clientId);
   if (device.ok) {
     return { ok: true, kind: "device", record: device.record };
   }
-  if (device.reason === "expired" || device.reason === "revoked") {
+  if (
+    device.reason === "expired" ||
+    device.reason === "revoked" ||
+    device.reason === "device_mismatch"
+  ) {
     return { ok: false, reason: device.reason };
   }
   // device.reason is "missing" or "unknown": try the static dev-compat token.

@@ -15,6 +15,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { homedir } from "node:os";
 
 /**
  * The isolation strategies a terminal agent may declare.
@@ -48,6 +49,24 @@ export const CONTAINER_ENGINES: readonly ContainerEngine[] = ["docker", "podman"
 
 /** Valid environment variable name — the only shape allowed in a container entry's `envAllowlist`. */
 export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Narrow host-owned write exceptions needed for public CLI session state.
+ * These paths are never configurable by, logged to, or sent to the phone.
+ */
+export function agentStateWritablePaths(
+  agentType: string,
+  homeDirectory = homedir(),
+): string[] {
+  switch (agentType) {
+    case "codex":
+      return [path.join(homeDirectory, ".codex")];
+    case "claudeCode":
+      return [path.join(homeDirectory, ".claude"), path.join(homeDirectory, ".claude.json")];
+    default:
+      return [];
+  }
+}
 
 /**
  * Container-specific sandbox settings, validated by `validateContainerConfig`
@@ -448,7 +467,11 @@ function escapeForProfile(p: string): string {
  */
 export function buildSandboxExecProfile(
   workingDirectory: string,
-  opts: { allowNetwork: boolean; allowedWorkingDirectoryOnly: boolean },
+  opts: {
+    allowNetwork: boolean;
+    allowedWorkingDirectoryOnly: boolean;
+    additionalWritablePaths?: readonly string[];
+  },
 ): string {
   let realWorkDir: string;
   try {
@@ -462,10 +485,24 @@ export function buildSandboxExecProfile(
   const lines = ["(version 1)", "(allow default)"];
 
   if (opts.allowedWorkingDirectoryOnly) {
+    const additionalWritablePaths = Array.from(
+      new Set(
+        (opts.additionalWritablePaths ?? []).map((candidate) => {
+          try {
+            return fs.realpathSync(candidate);
+          } catch {
+            return candidate;
+          }
+        }),
+      ),
+    ).filter((candidate) => candidate !== realWorkDir);
     lines.push(
       "(deny file-write*)",
       "(allow file-write*",
       `  (subpath "${escapeForProfile(realWorkDir)}")`,
+      ...additionalWritablePaths.map(
+        (candidate) => `  (subpath "${escapeForProfile(candidate)}")`,
+      ),
       '  (literal "/dev/null"))',
     );
   }
@@ -589,6 +626,7 @@ export function wrapCommandForSandbox(
   sandbox: ResolvedSandbox,
   workingDirectory: string,
   containerOpts?: { envPassthroughKeys: string[]; containerName: string },
+  additionalWritablePaths: readonly string[] = [],
 ): { command: string; args: string[]; detached: boolean } {
   switch (sandbox.effectiveMode) {
     case "none":
@@ -599,6 +637,7 @@ export function wrapCommandForSandbox(
       const profile = buildSandboxExecProfile(workingDirectory, {
         allowNetwork: sandbox.allowNetwork,
         allowedWorkingDirectoryOnly: sandbox.allowedWorkingDirectoryOnly,
+        additionalWritablePaths,
       });
       return {
         command: "/usr/bin/sandbox-exec",
@@ -632,7 +671,10 @@ export function wrapCommandForSandbox(
  * see exactly what isolation is (or is not) in effect. Deliberately blunt about
  * `none` / `restricted-process` NOT being real boundaries.
  */
-export function describeSandbox(sandbox: ResolvedSandbox): string {
+export function describeSandbox(
+  sandbox: ResolvedSandbox,
+  options: { providerStateWrites?: boolean } = {},
+): string {
   const downgradeNote = sandbox.downgraded
     ? ` requested "${sandbox.requestedMode}" is unavailable on this host, so it was downgraded;`
     : "";
@@ -658,7 +700,13 @@ export function describeSandbox(sandbox: ResolvedSandbox): string {
     }
     case "sandbox-exec": {
       const parts: string[] = [];
-      if (sandbox.allowedWorkingDirectoryOnly) parts.push("writes confined to the working directory");
+      if (sandbox.allowedWorkingDirectoryOnly) {
+        parts.push(
+          options.providerStateWrites
+            ? "writes confined to the working directory plus provider state"
+            : "writes confined to the working directory",
+        );
+      }
       parts.push(sandbox.allowNetwork ? "network allowed" : "network denied");
       return `[orbitory] sandbox: sandbox-exec (${parts.join("; ")}; reads NOT confined — best-effort, see docs/security.md).`;
     }

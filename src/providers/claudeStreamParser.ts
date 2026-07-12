@@ -31,6 +31,7 @@
  */
 
 import type { AgentStatus, ChangedFile, Localized, TerminalStream, TestResult } from "../types.js";
+import type { ResolvedProviderSelection } from "../providerControls.js";
 
 // ---------------------------------------------------------------------------
 // argv builder
@@ -46,7 +47,7 @@ export const APPROVAL_PROMPT_TOOL_NAME = "mcp__orbitory__approval_prompt";
  *   1. The operator's own `config.args` first (extras like `--model`,
  *      `--allowedTools` — host-configured, never client-supplied).
  *   2. The host-authoritative stream flags:
- *      `-p --output-format stream-json --input-format stream-json
+ *      `-p --verbose --output-format stream-json --input-format stream-json
  *       --include-partial-messages --session-id <uuid>`.
  *   3. When an approval bridge is wired (Mechanism A):
  *      `--permission-prompt-tool <toolName> --mcp-config <path>
@@ -58,10 +59,19 @@ export function buildClaudeArgv(
   config: { args: string[] },
   sessionUuid: string,
   bridge?: { toolName: string; mcpConfigPath: string },
+  selection?: ResolvedProviderSelection,
 ): string[] {
+  const selectedArgs = [
+    ...(selection?.modelCliValue ? ["--model", selection.modelCliValue] : []),
+    ...(selection?.intent === "plan" || selection?.intent === "review"
+      ? ["--permission-mode", "plan"]
+      : []),
+  ];
   const argv = [
     ...config.args,
+    ...selectedArgs,
     "-p",
+    "--verbose",
     "--output-format",
     "stream-json",
     "--input-format",

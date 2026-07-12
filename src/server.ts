@@ -17,7 +17,7 @@ import { registerHttpRoutes } from "./http.js";
 import { redactingRequestSerializer } from "./logging.js";
 import sessionStore from "./sessionStore.js";
 import type { AuditEvent, Envelope } from "./types.js";
-import { registerWebSocketRoute } from "./ws.js";
+import { registerWebSocketRoute, type ProjectCatalogSnapshotSource } from "./ws.js";
 
 /**
  * Phase 10 audit wiring. The derive listener maps the session/approval envelope
@@ -61,6 +61,8 @@ export interface BuildServerOptions {
    * used only to configure the server and is never logged.
    */
   tls?: { cert: Buffer; key: Buffer };
+  /** Injectable read-only project catalog for deterministic transport tests. */
+  projectCatalog?: ProjectCatalogSnapshotSource;
 }
 
 export async function buildServer(
@@ -89,7 +91,7 @@ export async function buildServer(
 
   wireAudit();
   await registerHttpRoutes(app);
-  registerWebSocketRoute(app);
+  registerWebSocketRoute(app, options.projectCatalog);
   // Phase 16: loopback-only approval-bridge endpoint for the Claude Code
   // stream provider's permission-prompt tool (see src/approvalBridge.ts).
   // Guarded by a per-session bridge token — NOT part of the client protocol.

@@ -9,6 +9,8 @@ import assert from "node:assert/strict";
 
 import { startTestServer, type TestServer } from "./helpers/testServer.js";
 import { connect } from "./helpers/wsClient.js";
+import { setPairedDeviceStoreForTests } from "../src/auth.js";
+import { MemoryPersistence, PairedDeviceStore } from "../src/pairedDevices.js";
 
 const PAIRING_TOKEN = process.env["ORBITORY_PAIRING_TOKEN"];
 assert.ok(PAIRING_TOKEN, "ORBITORY_PAIRING_TOKEN must be set for tests to run.");
@@ -42,6 +44,84 @@ describe("WebSocket auth: invalid token", () => {
 });
 
 describe("WebSocket auth: successful handshake", () => {
+  test("client commands are handled immediately while the project catalog is still loading", async () => {
+    let snapshotCalls = 0;
+    let releaseCatalog: ((value: { projects: []; resumableSessions: [] }) => void) | undefined;
+    const delayedCatalog = new Promise<{ projects: []; resumableSessions: [] }>((resolve) => {
+      releaseCatalog = resolve;
+    });
+    const isolatedServer = await startTestServer({
+      projectCatalog: {
+        snapshot: () => {
+          snapshotCalls += 1;
+          return delayedCatalog;
+        },
+      },
+    });
+    const client = connect(
+      `${isolatedServer.wsUrl}/ws?token=${encodeURIComponent(PAIRING_TOKEN!)}`,
+    );
+
+    try {
+      await client.waitForOpen();
+      await client.waitFor((e) => e.type === "server.hello");
+      await client.waitFor((e) => e.type === "providers.snapshot");
+      assert.equal(snapshotCalls, 1, "the injected delayed catalog must own this handshake");
+
+      client.send({
+        type: "providers.request",
+        version: 1,
+        timestamp: new Date().toISOString(),
+        sessionId: null,
+        payload: {},
+      });
+
+      await client.waitFor((e) => e.type === "providers.snapshot", 500);
+    } finally {
+      releaseCatalog?.({ projects: [], resumableSessions: [] });
+      client.close();
+      await isolatedServer.close();
+    }
+  });
+
+  test("a saved profile reconnects after the 10-minute pairing window", async () => {
+    let clock = new Date("2026-07-04T00:00:00.000Z");
+    const deviceStore = new PairedDeviceStore({
+      persistence: new MemoryPersistence(),
+      now: () => clock,
+      deviceTtlSeconds: 30 * 24 * 60 * 60,
+    });
+    const { rawToken } = deviceStore.issue({ deviceName: "iPhone", ttlSeconds: 600 });
+    setPairedDeviceStoreForTests(deviceStore);
+
+    const first = connect(`${server.wsUrl}/ws`);
+    await first.waitForOpen();
+    first.send({
+      type: "client.hello",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: { token: rawToken, clientId: "ios-profile-1" },
+    });
+    await first.waitFor((e) => e.type === "server.hello");
+    first.close();
+    await first.waitForClose();
+
+    clock = new Date("2026-07-04T00:15:00.000Z");
+    const reconnect = connect(`${server.wsUrl}/ws`);
+    await reconnect.waitForOpen();
+    reconnect.send({
+      type: "client.hello",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: { token: rawToken, clientId: "ios-profile-1" },
+    });
+    await reconnect.waitFor((e) => e.type === "server.hello");
+    reconnect.close();
+    await reconnect.waitForClose();
+  });
+
   test("correct token via query param -> server.hello then session.snapshot in order", async () => {
     const client = connect(`${server.wsUrl}/ws?token=${encodeURIComponent(PAIRING_TOKEN!)}`);
     await client.waitForOpen();

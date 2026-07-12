@@ -42,6 +42,7 @@ import {
   type SandboxMode,
   type SandboxPolicy,
 } from "./sandbox.js";
+import { loadProviderControls } from "./providerControls.js";
 
 /** The `AgentType` values a config entry may declare, and the fallback. */
 const KNOWN_AGENT_TYPES: readonly AgentType[] = [
@@ -108,8 +109,11 @@ export interface TerminalAgentConfig {
    * real approvals). Only accepted with `agentType: "claudeCode"` — the
    * stream schema and permission-prompt mechanism are Claude Code's. This
    * field is host-only and is NEVER exposed in a `ProviderDescriptor`.
+   * `"codex-jsonl"` → `CodexExecProvider` runs one public `codex exec
+   * --json` turn at a time and resumes the host-held thread id for later
+   * messages. Only accepted with `agentType: "codex"`.
    */
-  io?: "text" | "stream-json";
+  io?: "text" | "stream-json" | "codex-jsonl";
   /**
    * Optional environment allowlist. When **present** (the key exists in the
    * config, even as an empty array), the spawned process receives ONLY these
@@ -466,9 +470,17 @@ function coerceAgentType(raw: unknown, label: string): AgentType {
 
 interface RawAgentConfigFile {
   agents?: unknown;
+  projectCatalog?: unknown;
 }
 
-function defaultConfigPath(): string {
+export interface CodexHistoryDiscoveryConfig {
+  enabled: true;
+  providerId: string;
+  additionalProviderIds: string[];
+  maxSessions: number;
+}
+
+export function defaultConfigPath(): string {
   return (
     process.env["ORBITORY_AGENT_CONFIG_PATH"] ??
     path.join(process.cwd(), "orbitory.config.json")
@@ -584,9 +596,14 @@ function validateEntry(
   // "custom"), a bad `io` value changes which EXECUTION PATH drives the
   // process — never guess; drop the entry loudly.
   const agentType = coerceAgentType(raw.agentType, `${label} ("${raw.id}")`);
-  if (raw.io !== undefined && raw.io !== "text" && raw.io !== "stream-json") {
+  if (
+    raw.io !== undefined &&
+    raw.io !== "text" &&
+    raw.io !== "stream-json" &&
+    raw.io !== "codex-jsonl"
+  ) {
     console.warn(
-      `[orbitory-host-agent] ${label} ("${raw.id}"): "io" must be "text" or "stream-json"; skipping.`,
+      `[orbitory-host-agent] ${label} ("${raw.id}"): "io" must be "text", "stream-json", or "codex-jsonl"; skipping.`,
     );
     return undefined;
   }
@@ -594,6 +611,13 @@ function validateEntry(
     console.warn(
       `[orbitory-host-agent] ${label} ("${raw.id}"): io "stream-json" is only supported with ` +
         `agentType "claudeCode" (the stream schema and permission-prompt mechanism are Claude Code's); skipping.`,
+    );
+    return undefined;
+  }
+  if (raw.io === "codex-jsonl" && agentType !== "codex") {
+    console.warn(
+      `[orbitory-host-agent] ${label} ("${raw.id}"): io "codex-jsonl" is only supported with ` +
+        `agentType "codex" (the JSONL event schema and resume command are Codex-specific); skipping.`,
     );
     return undefined;
   }
@@ -701,7 +725,95 @@ function validateEntry(
       (raw.approvalTimeoutSeconds as number | undefined) ?? DEFAULT_APPROVAL_TIMEOUT_SECONDS,
     ...(raw.envAllowlist !== undefined ? { envAllowlist: raw.envAllowlist as string[] } : {}),
     sandbox,
-    ...(raw.io !== undefined ? { io: raw.io as "text" | "stream-json" } : {}),
+    ...(raw.io !== undefined
+      ? { io: raw.io as "text" | "stream-json" | "codex-jsonl" }
+      : {}),
+  };
+}
+
+/**
+ * Load the explicit host-local opt-in for read-only Codex history discovery.
+ * Malformed settings fail closed and disable discovery.
+ */
+export function loadCodexHistoryDiscoveryConfig(
+  configPath: string = defaultConfigPath(),
+): CodexHistoryDiscoveryConfig | undefined {
+  if (!fs.existsSync(configPath)) return undefined;
+
+  let raw: RawAgentConfigFile;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as RawAgentConfigFile;
+  } catch {
+    return undefined;
+  }
+
+  if (raw.projectCatalog === undefined) return undefined;
+  if (
+    typeof raw.projectCatalog !== "object" ||
+    raw.projectCatalog === null ||
+    Array.isArray(raw.projectCatalog)
+  ) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: "projectCatalog" must be an object; Codex history discovery disabled.`,
+    );
+    return undefined;
+  }
+
+  const catalog = raw.projectCatalog as Record<string, unknown>;
+  const history = catalog["codexHistory"];
+  if (history === undefined) return undefined;
+  if (typeof history !== "object" || history === null || Array.isArray(history)) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: "projectCatalog.codexHistory" must be an object; discovery disabled.`,
+    );
+    return undefined;
+  }
+
+  const value = history as Record<string, unknown>;
+  if (value["enabled"] !== true) return undefined;
+  if (typeof value["providerId"] !== "string" || value["providerId"].trim().length === 0) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: enabled Codex history discovery needs a non-empty providerId; disabled.`,
+    );
+    return undefined;
+  }
+  const maxSessions = value["maxSessions"] ?? 100;
+  if (
+    typeof maxSessions !== "number" ||
+    !Number.isInteger(maxSessions) ||
+    maxSessions < 1 ||
+    maxSessions > 200
+  ) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: Codex history maxSessions must be an integer from 1 to 200; disabled.`,
+    );
+    return undefined;
+  }
+
+  const additionalProviderIds = value["additionalProviderIds"] ?? [];
+  if (
+    !Array.isArray(additionalProviderIds) ||
+    additionalProviderIds.length > 20 ||
+    additionalProviderIds.some(
+      (providerId) =>
+        typeof providerId !== "string" ||
+        providerId.trim().length === 0 ||
+        providerId.length > 128,
+    )
+  ) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: Codex history additionalProviderIds must be an array of up to 20 provider ids; disabled.`,
+    );
+    return undefined;
+  }
+
+  return {
+    enabled: true,
+    providerId: value["providerId"],
+    additionalProviderIds: Array.from(
+      new Set(additionalProviderIds.filter((providerId) => providerId !== value["providerId"])),
+    ),
+    maxSessions,
   };
 }
 
@@ -859,6 +971,7 @@ function providerWarnings(
 /** Build a startable descriptor from a loaded (valid, enabled) config. */
 function descriptorForLoadedConfig(config: TerminalAgentConfig): ProviderDescriptor {
   const sb = config.sandbox;
+  const controls = loadProviderControls(config.agentType);
   // Risk/network/warnings reflect what's actually ENFORCED (effectiveMode); the
   // displayed sandboxMode is what was REQUESTED (so a downgraded-to-none entry
   // honestly reads "requested container, unsupported, running unsandboxed").
@@ -875,6 +988,8 @@ function descriptorForLoadedConfig(config: TerminalAgentConfig): ProviderDescrip
     networkPolicy: providerNetworkPolicy(sb.effectiveMode, sb.allowNetwork),
     riskLevel: providerRiskLevel(config.agentType, sb.effectiveMode, sb.allowNetwork),
     warnings: providerWarnings(config.agentType, sb.effectiveMode, sb.allowNetwork, sb.supported),
+    launchProfiles: controls.launchProfiles,
+    models: controls.models,
   };
 }
 
@@ -920,6 +1035,7 @@ function descriptorForRejectedEntry(raw: RawAgentConfigEntry): ProviderDescripto
       : mode === "sandbox-exec"
         ? rawSb?.["allowNetwork"] !== false // sandbox-exec default: allowed
         : false;
+  const controls = loadProviderControls(agentType);
 
   return {
     id,
@@ -934,6 +1050,8 @@ function descriptorForRejectedEntry(raw: RawAgentConfigEntry): ProviderDescripto
     networkPolicy: providerNetworkPolicy(mode, allowNetwork),
     riskLevel: providerRiskLevel(agentType, mode, allowNetwork),
     warnings: providerWarnings(agentType, mode, allowNetwork, sandboxSupported),
+    launchProfiles: controls.launchProfiles,
+    models: controls.models,
   };
 }
 

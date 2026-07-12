@@ -52,6 +52,23 @@ function makeLoggedInCodexBin(): string {
   return fakeBin;
 }
 
+function makeLoggedInClaudeBin(): string {
+  const fakeBin = path.join(makeTempDir(), "bin");
+  fs.mkdirSync(fakeBin);
+  fs.writeFileSync(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi",
+      "if [ \"$1\" = \"-p\" ]; then printf '%s\\n' '{\"is_error\":false,\"result\":\"OK\"}'; exit 0; fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  return fakeBin;
+}
+
 function readPackageJson(): Record<string, unknown> {
   return JSON.parse(fs.readFileSync(path.join(hostAgentDir, "package.json"), "utf8")) as Record<string, unknown>;
 }
@@ -158,7 +175,7 @@ describe("public npm package metadata", () => {
       env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
     });
 
-    assert.match(output, /Enabled provider: Codex \(this project\) \(codex-local\)/);
+    assert.match(output, /Enabled provider: Codex · orbitory-public-host-test-/);
     assert.match(output, /host is already running, tap Refresh/);
     assert.match(output, /If no host is running, start it from this folder with `npx orbitory-host@latest`/);
 
@@ -169,12 +186,91 @@ describe("public npm package metadata", () => {
     };
     assert.equal(config.agents.length, 1);
     const codex = config.agents[0];
-    assert.equal(codex.id, "codex-local");
+    assert.match(String(codex.id), /^codex-[a-f0-9]{10}$/);
     assert.equal(codex.enabled, true);
     assert.equal(path.basename(String(codex.command)), "codex");
-    assert.deepEqual(codex.args, ["exec"]);
+    assert.deepEqual(codex.args, []);
+    assert.equal(codex.io, "codex-jsonl");
     assert.deepEqual(codex.envAllowlist, ["PATH", "HOME", "OPENAI_API_KEY"]);
     assert.equal(fs.realpathSync(String(codex.workingDirectory)), fs.realpathSync(cwd));
+  });
+
+  test("--setup claude preserves the user identity required by runtime authentication", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = makeLoggedInClaudeBin();
+
+    execFileSync(process.execPath, [binPath, "--setup", "claude", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+    });
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(cwd, "orbitory.config.json"), "utf8"),
+    ) as { agents: Array<Record<string, unknown>> };
+    assert.deepEqual(config.agents[0]?.envAllowlist, ["PATH", "HOME", "USER", "LOGNAME"]);
+  });
+
+  test("--setup claude rejects authentication that depends on an environment value runtime strips", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(
+      path.join(fakeBin, "claude"),
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ] && [ -n \"$FULL_ENV_ONLY_AUTH\" ]; then exit 0; fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const result = spawnSync(process.execPath, [binPath, "--setup", "claude", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}`,
+        FULL_ENV_ONLY_AUTH: "must-not-reach-runtime-check",
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), false);
+  });
+
+  test("--setup claude rejects stale credentials even when auth status claims logged in", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(
+      path.join(fakeBin, "claude"),
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi",
+        "if [ \"$1\" = \"-p\" ]; then",
+        "  printf '%s\\n' '{\"is_error\":true,\"result\":\"Failed to authenticate. API Error: 401\"}'",
+        "  exit 1",
+        "fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+
+    const result = spawnSync(process.execPath, [binPath, "--setup", "claude", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Claude Code is not logged in/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), false);
   });
 
   test("--setup reports an existing Codex login as ready", () => {
@@ -294,6 +390,10 @@ describe("public npm package metadata", () => {
         `  touch \"${stateFile}\"`,
         "  exit 0",
         "fi",
+        "if [ \"$1\" = \"-p\" ]; then",
+        `  test -f \"${stateFile}\"`,
+        "  exit $?",
+        "fi",
         "exit 1",
         "",
       ].join("\n"),
@@ -358,6 +458,11 @@ describe("public npm package metadata", () => {
       "  eof { exit 4 }",
       "  timeout { exit 5 }",
       "}",
+      "expect {",
+      "  -re {Enable recent Codex projects.*:} { send \"n\\r\" }",
+      "  eof { exit 6 }",
+      "  timeout { exit 7 }",
+      "}",
       "expect eof",
       "set result [wait]",
       "exit [lindex $result 3]",
@@ -406,9 +511,14 @@ describe("public npm package metadata", () => {
       "}",
       "expect {",
       "  -re {Sign in .*:} { exit 6 }",
-      "  -re {Enabled provider: Codex} {}",
+      "  -re {Enable recent Codex projects.*:} { send \"n\\r\" }",
       "  eof { exit 4 }",
       "  timeout { exit 5 }",
+      "}",
+      "expect {",
+      "  -re {Enabled provider: Codex} {}",
+      "  eof { exit 7 }",
+      "  timeout { exit 8 }",
       "}",
       "expect eof",
       "set result [wait]",
@@ -509,9 +619,100 @@ describe("public npm package metadata", () => {
     const demo = config.agents.find((agent) => agent.id === "demo-terminal");
     const codex = config.agents.find((agent) => agent.id === "codex-local");
     assert.equal(demo?.displayName, "Existing Demo");
-    assert.equal(codex?.displayName, "Codex (this project)");
+    assert.match(String(codex?.displayName), /^Codex · orbitory-public-host-test-/);
     assert.equal(codex?.enabled, true);
-    assert.deepEqual(codex?.args, ["exec"]);
+    assert.deepEqual(codex?.args, []);
+    assert.equal(codex?.io, "codex-jsonl");
+  });
+
+  test("Codex history needs an explicit setup flag and provider removal is host-local", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = makeLoggedInCodexBin();
+    const env = { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` };
+
+    execFileSync(
+      process.execPath,
+      [binPath, "--setup", "codex", "--include-codex-projects", "--yes"],
+      { cwd, encoding: "utf8", env },
+    );
+    const configPath = path.join(cwd, "orbitory.config.json");
+    const configured = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: Array<Record<string, unknown>>;
+      projectCatalog: { codexHistory: { enabled: boolean; providerId: string } };
+    };
+    const providerId = String(configured.agents[0]?.id);
+    assert.equal(configured.projectCatalog.codexHistory.enabled, true);
+    assert.equal(configured.projectCatalog.codexHistory.providerId, providerId);
+
+    execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env,
+    });
+    const revoked = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      projectCatalog?: { codexHistory?: unknown };
+    };
+    assert.equal(
+      revoked.projectCatalog?.codexHistory,
+      undefined,
+      "rerunning setup without the explicit history flag must revoke broad access",
+    );
+
+    execFileSync(
+      process.execPath,
+      [binPath, "--setup", "codex", "--include-codex-projects", "--yes"],
+      { cwd, encoding: "utf8", env },
+    );
+
+    const listed = execFileSync(process.execPath, [binPath, "--list-providers"], {
+      cwd,
+      encoding: "utf8",
+    });
+    assert.match(listed, new RegExp(providerId));
+
+    execFileSync(process.execPath, [binPath, "--remove-provider", providerId, "--yes"], {
+      cwd,
+      encoding: "utf8",
+    });
+    const removed = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: unknown[];
+      projectCatalog?: { codexHistory?: unknown };
+    };
+    assert.equal(removed.agents.length, 0);
+    assert.equal(removed.projectCatalog?.codexHistory, undefined);
+  });
+
+  test("Claude setup can explicitly share the recent Codex project catalog", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const codexBin = makeLoggedInCodexBin();
+    const claudeBin = makeLoggedInClaudeBin();
+    const env = {
+      ...process.env,
+      PATH: `${codexBin}${path.delimiter}${claudeBin}${path.delimiter}${process.env["PATH"] ?? ""}`,
+    };
+
+    execFileSync(
+      process.execPath,
+      [binPath, "--setup", "codex", "--include-codex-projects", "--yes"],
+      { cwd, encoding: "utf8", env },
+    );
+    execFileSync(
+      process.execPath,
+      [binPath, "--setup", "claude", "--include-recent-projects", "--yes"],
+      { cwd, encoding: "utf8", env },
+    );
+
+    const config = JSON.parse(
+      fs.readFileSync(path.join(cwd, "orbitory.config.json"), "utf8"),
+    ) as {
+      agents: Array<{ id: string; agentType: string }>;
+      projectCatalog: { codexHistory: { additionalProviderIds?: string[] } };
+    };
+    const claudeId = config.agents.find((agent) => agent.agentType === "claudeCode")?.id;
+    assert.ok(claudeId);
+    assert.deepEqual(config.projectCatalog.codexHistory.additionalProviderIds, [claudeId]);
   });
 });
 
@@ -531,6 +732,9 @@ describe("prepare-public-host-repo.mjs", () => {
     assert.equal(fs.existsSync(path.join(out, "LICENSE")), true);
     assert.equal(fs.existsSync(path.join(out, "bin/orbitory-host.js")), true);
     assert.equal(fs.existsSync(path.join(out, "scripts/prepare-public-host-repo.mjs")), true);
+    const codexExecFixture = path.join(out, "scripts/fake-codex-exec.js");
+    assert.equal(fs.existsSync(codexExecFixture), true);
+    assert.notEqual(fs.statSync(codexExecFixture).mode & 0o111, 0, "Codex fixture must remain executable");
     assert.equal(fs.existsSync(path.join(out, "src/index.ts")), true);
     assert.equal(fs.existsSync(path.join(out, "shared/fixtures/session.snapshot.json")), true);
     assert.equal(fs.existsSync(path.join(out, "docs/guide/en/setup.md")), true);
@@ -587,6 +791,9 @@ describe("prepare-public-host-repo.mjs", () => {
     const out = path.join(makeTempDir(), "orbitory-host");
     preparePublicHostRepo({ out });
     fs.writeFileSync(path.join(out, "stale.txt"), "stale\n");
+    const gitSentinel = path.join(out, ".git", "orbitory-test-sentinel");
+    fs.mkdirSync(path.dirname(gitSentinel), { recursive: true });
+    fs.writeFileSync(gitSentinel, "preserve public mirror history\n", "utf8");
 
     assert.throws(
       () => preparePublicHostRepo({ out }),
@@ -596,5 +803,6 @@ describe("prepare-public-host-repo.mjs", () => {
     preparePublicHostRepo({ out, force: true });
     assert.equal(fs.existsSync(path.join(out, "stale.txt")), false);
     assert.equal(fs.existsSync(path.join(out, "README.md")), true);
+    assert.equal(fs.readFileSync(gitSentinel, "utf8"), "preserve public mirror history\n");
   });
 });

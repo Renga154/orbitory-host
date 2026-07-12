@@ -8,6 +8,8 @@
 import { after, before, describe, test } from "node:test";
 import assert from "node:assert/strict";
 
+import { setPairedDeviceStoreForTests } from "../src/auth.js";
+import { MemoryPersistence, PairedDeviceStore } from "../src/pairedDevices.js";
 import { startTestServer, type TestServer } from "./helpers/testServer.js";
 
 // The npm "test" script sets ORBITORY_PAIRING_TOKEN=orbitory-test-token
@@ -88,6 +90,37 @@ describe("GET /sessions", () => {
     assert.equal(res.status, 200);
     const body = (await res.json()) as { sessions: unknown[] };
     assertWellFormedSessionsResponse(body);
+  });
+
+  test("a saved device credential requires its matching stable client id", async () => {
+    const store = new PairedDeviceStore({
+      persistence: new MemoryPersistence(),
+      deviceTtlSeconds: 30 * 24 * 60 * 60,
+    });
+    setPairedDeviceStoreForTests(store);
+    const { rawToken } = store.issue({ deviceName: "Test iPhone", ttlSeconds: 600 });
+    assert.equal(store.verify(rawToken, "profile-test-1").ok, true);
+
+    const missingClientId = await fetch(`${server.httpUrl}/sessions`, {
+      headers: { Authorization: `Bearer ${rawToken}` },
+    });
+    assert.equal(missingClientId.status, 401);
+
+    const wrongClientId = await fetch(`${server.httpUrl}/sessions`, {
+      headers: {
+        Authorization: `Bearer ${rawToken}`,
+        "X-Orbitory-Client-Id": "profile-test-2",
+      },
+    });
+    assert.equal(wrongClientId.status, 401);
+
+    const matchingClientId = await fetch(`${server.httpUrl}/sessions`, {
+      headers: {
+        Authorization: `Bearer ${rawToken}`,
+        "X-Orbitory-Client-Id": "profile-test-1",
+      },
+    });
+    assert.equal(matchingClientId.status, 200);
   });
 });
 

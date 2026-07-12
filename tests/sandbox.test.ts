@@ -21,6 +21,7 @@ import * as path from "node:path";
 import {
   buildContainerArgv,
   buildSandboxExecProfile,
+  agentStateWritablePaths,
   defaultResolvedSandbox,
   describeSandbox,
   isSandboxModeSupported,
@@ -181,6 +182,31 @@ describe("sandbox: buildSandboxExecProfile", () => {
 
     const noConfine = buildSandboxExecProfile(dir, { allowNetwork: true, allowedWorkingDirectoryOnly: false });
     assert.equal(/\(deny file-write\*\)/.test(noConfine), false);
+  });
+
+  test("allows only explicitly supplied CLI state paths in addition to the workspace", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-agent-state-"));
+    const profile = buildSandboxExecProfile(dir, {
+      allowNetwork: true,
+      allowedWorkingDirectoryOnly: true,
+      additionalWritablePaths: [stateDir],
+    });
+
+    assert.ok(profile.includes(`(subpath "${fs.realpathSync(stateDir)}")`));
+    assert.equal(profile.includes(`(subpath "${path.dirname(fs.realpathSync(stateDir))}")`), false);
+  });
+});
+
+describe("sandbox: agentStateWritablePaths", () => {
+  test("opens only the selected CLI's own state files", () => {
+    assert.deepEqual(agentStateWritablePaths("codex", "/Users/tester"), [
+      "/Users/tester/.codex",
+    ]);
+    assert.deepEqual(agentStateWritablePaths("claudeCode", "/Users/tester"), [
+      "/Users/tester/.claude",
+      "/Users/tester/.claude.json",
+    ]);
+    assert.deepEqual(agentStateWritablePaths("custom", "/Users/tester"), []);
   });
 });
 

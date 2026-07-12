@@ -24,12 +24,14 @@ import {
   recordSessionStopRequested,
 } from "./audit.js";
 import { redactToken } from "./logging.js";
+import { projectCatalog } from "./projectCatalog.js";
 import { sessionStore } from "./sessionStore.js";
 import type {
   ApprovalDecision,
   ClientMessage,
   Envelope,
   ErrorPayload,
+  ProjectsSnapshotPayload,
   ServerMessage,
 } from "./types.js";
 
@@ -44,6 +46,7 @@ const SERVER_CAPABILITIES = [
   "terminalOutput",
   "testResults",
   "auditLog",
+  "projects",
 ];
 
 function serverCapabilities(): string[] {
@@ -128,12 +131,19 @@ function extractTokenFromQuery(request: FastifyRequest): string | undefined {
  * `@fastify/websocket` has already been registered on `app` (done in
  * server.ts).
  */
-export function registerWebSocketRoute(app: FastifyInstance): void {
+export interface ProjectCatalogSnapshotSource {
+  snapshot(force?: boolean): Promise<ProjectsSnapshotPayload>;
+}
+
+export function registerWebSocketRoute(
+  app: FastifyInstance,
+  catalog: ProjectCatalogSnapshotSource = projectCatalog,
+): void {
   app.get(
     "/ws",
     { websocket: true },
     (socket: WebSocket, request: FastifyRequest) => {
-      handleConnection(socket, request).catch((err) => {
+      handleConnection(socket, request, catalog).catch((err) => {
         console.error(
           "[orbitory-host-agent] Unexpected error handling WS connection:",
           err,
@@ -151,10 +161,11 @@ export function registerWebSocketRoute(app: FastifyInstance): void {
 async function handleConnection(
   socket: WebSocket,
   request: FastifyRequest,
+  catalog: ProjectCatalogSnapshotSource,
 ): Promise<void> {
   const queryToken = extractTokenFromQuery(request);
 
-  const { token, timedOut } = await resolveToken(socket, queryToken);
+  const { token, clientId, timedOut } = await resolveToken(socket, queryToken);
 
   // docs/protocol.md section 7 distinguishes "handshake_timeout" (no valid
   // client.hello arrived in time) from "unauthorized" (a hello did arrive,
@@ -175,7 +186,7 @@ async function handleConnection(
     return;
   }
 
-  const auth = verifyPresentedToken(token);
+  const auth = verifyPresentedToken(token, clientId);
   if (!auth.ok) {
     console.warn(
       `[orbitory-host-agent] WS auth failed (${auth.reason}) for token ${redactToken(
@@ -184,10 +195,18 @@ async function handleConnection(
     );
     // Phase 10: audit the auth failure (reason code only — never the token).
     recordAuthFailed(`ws:${auth.reason}`);
+    const errorCode =
+      auth.reason === "expired"
+        ? "credential_expired"
+        : auth.reason === "revoked"
+          ? "credential_revoked"
+          : auth.reason === "device_mismatch"
+            ? "credential_device_mismatch"
+            : "unauthorized";
     sendError(
       socket,
       null,
-      "unauthorized",
+      errorCode,
       "Invalid or missing pairing token.",
     );
     socket.close(CLOSE_CODE_UNAUTHORIZED, "unauthorized");
@@ -231,14 +250,9 @@ async function handleConnection(
     }),
   );
 
-  // Phase 10: recent audit events, sent once after the provider snapshot.
-  sendEnvelope(
-    socket,
-    makeEnvelope("audit.snapshot", null, {
-      events: getAuditStore().recent(),
-    }),
-  );
-
+  // Register the steady-state handlers before project history discovery. The
+  // latter can take several seconds; client commands sent after server.hello
+  // must never disappear while that read-only catalog is loading.
   const forward = (envelope: ServerMessage | Envelope<unknown>): void => {
     sendEnvelope(socket, envelope as Envelope<unknown>);
   };
@@ -246,7 +260,7 @@ async function handleConnection(
   sessionStore.on("event", forward);
 
   socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
-    handleIncomingMessage(socket, raw);
+    handleIncomingMessage(socket, raw, catalog);
   });
 
   socket.on("close", () => {
@@ -256,10 +270,25 @@ async function handleConnection(
   socket.on("error", (err: Error) => {
     console.error("[orbitory-host-agent] WS socket error:", err);
   });
+
+  // Phase 10: recent audit events are available immediately and do not wait
+  // for project history discovery.
+  sendEnvelope(
+    socket,
+    makeEnvelope("audit.snapshot", null, {
+      events: getAuditStore().recent(),
+    }),
+  );
+
+  sendEnvelope(
+    socket,
+    makeEnvelope("projects.snapshot", null, await catalog.snapshot()),
+  );
 }
 
 interface TokenResolution {
   token: string | undefined;
+  clientId: string | undefined;
   /** True only when no valid `client.hello` arrived before `HELLO_TIMEOUT_MS` elapsed. */
   timedOut: boolean;
 }
@@ -280,7 +309,7 @@ function resolveToken(
   queryToken: string | undefined,
 ): Promise<TokenResolution> {
   if (queryToken !== undefined) {
-    return Promise.resolve({ token: queryToken, timedOut: false });
+    return Promise.resolve({ token: queryToken, clientId: undefined, timedOut: false });
   }
 
   return new Promise((resolve) => {
@@ -290,7 +319,7 @@ function resolveToken(
       if (settled) return;
       settled = true;
       socket.off("message", onMessage);
-      resolve({ token: undefined, timedOut: true });
+      resolve({ token: undefined, clientId: undefined, timedOut: true });
     }, HELLO_TIMEOUT_MS);
 
     function onMessage(raw: Buffer | ArrayBuffer | Buffer[]): void {
@@ -321,11 +350,23 @@ function resolveToken(
         typeof (payload as { token?: unknown }).token === "string"
           ? ((payload as { token: string }).token as string)
           : undefined;
+      const rawClientId =
+        typeof payload === "object" && payload !== null
+          ? (payload as { clientId?: unknown }).clientId
+          : undefined;
+      const clientId =
+        typeof rawClientId === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(rawClientId)
+          ? rawClientId
+          : undefined;
 
       settled = true;
       clearTimeout(timer);
       socket.off("message", onMessage);
-      resolve({ token, timedOut: false });
+      resolve({
+        token: rawClientId !== undefined && clientId === undefined ? undefined : token,
+        clientId,
+        timedOut: false,
+      });
     }
 
     socket.on("message", onMessage);
@@ -335,6 +376,7 @@ function resolveToken(
 function handleIncomingMessage(
   socket: WebSocket,
   raw: Buffer | ArrayBuffer | Buffer[],
+  catalog: ProjectCatalogSnapshotSource,
 ): void {
   try {
     const parsed: unknown = JSON.parse(raw.toString());
@@ -360,7 +402,7 @@ function handleIncomingMessage(
       typeof message.sessionId === "string" ? message.sessionId : null;
     const payload = (message.payload ?? {}) as Record<string, unknown>;
 
-    dispatch(socket, type, sessionId, payload);
+    dispatch(socket, type, sessionId, payload, catalog);
   } catch (err) {
     console.error(
       "[orbitory-host-agent] Failed to parse incoming WS message:",
@@ -375,6 +417,7 @@ function dispatch(
   type: string,
   sessionId: string | null,
   payload: Record<string, unknown>,
+  catalog: ProjectCatalogSnapshotSource,
 ): void {
   try {
     switch (type) {
@@ -478,6 +521,44 @@ function dispatch(
         // treated as a command or forwarded to a shell.
         const providerId =
           typeof payload["providerId"] === "string" ? payload["providerId"] : undefined;
+        const projectId =
+          typeof payload["projectId"] === "string" ? payload["projectId"] : undefined;
+        const resumeId =
+          typeof payload["resumeId"] === "string" ? payload["resumeId"] : undefined;
+        const rawLaunchProfileId = payload["launchProfileId"];
+        const rawModelId = payload["modelId"];
+        const launchProfileId =
+          typeof rawLaunchProfileId === "string" ? rawLaunchProfileId : undefined;
+        const modelId = typeof rawModelId === "string" ? rawModelId : undefined;
+        if (
+          (rawLaunchProfileId !== undefined &&
+            (launchProfileId === undefined ||
+              !/^[A-Za-z0-9._-]{1,64}$/u.test(launchProfileId))) ||
+          (rawModelId !== undefined &&
+            (modelId === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(modelId)))
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.start launchProfileId/modelId must be provider-advertised opaque ids.",
+          );
+          return;
+        }
+        const rawRequestId = payload["requestId"];
+        const requestId = typeof rawRequestId === "string" ? rawRequestId : undefined;
+        if (
+          rawRequestId !== undefined &&
+          (requestId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(requestId))
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.start payload.requestId must be 1-128 ASCII letters, numbers, '.', '_', or '-'.",
+          );
+          return;
+        }
         // `initialPrompt` (docs/protocol.md §5) is delivered as the session's
         // first user chat message — for a terminal-backed session that means
         // the provider writes it to the child's stdin, exactly like any other
@@ -489,7 +570,18 @@ function dispatch(
         if (providerId !== undefined) {
           recordProviderStartRequested(providerId, agentType);
         }
-        const created = sessionStore.startSession(hostId, agentType, title, providerId, initialPrompt);
+        const created = sessionStore.startSession(
+          hostId,
+          agentType,
+          title,
+          providerId,
+          initialPrompt,
+          projectId,
+          resumeId,
+          requestId,
+          launchProfileId,
+          modelId,
+        );
         if (created === undefined && providerId !== undefined) {
           // A provider-specific rejection (unknown/disabled id). Reason code only —
           // never the hostile client fields, command, args, image, or env.
@@ -521,6 +613,23 @@ function dispatch(
             providers: sessionStore.getProviderDescriptors(),
           }),
         );
+        return;
+      }
+
+      case "projects.request": {
+        void catalog
+          .snapshot(true)
+          .then((snapshot) => {
+            sendEnvelope(socket, makeEnvelope("projects.snapshot", null, snapshot));
+          })
+          .catch(() => {
+            sendError(
+              socket,
+              null,
+              "internal_error",
+              "Unable to refresh the project catalog.",
+            );
+          });
         return;
       }
 

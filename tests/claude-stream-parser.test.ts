@@ -39,12 +39,18 @@ function mapLine(line: string, context = ctx()): StreamEmission[] {
 // ---------------------------------------------------------------------------
 
 describe("buildClaudeArgv", () => {
+  test("enables verbose output required by current Claude stream-json mode", () => {
+    const argv = buildClaudeArgv({ args: [] }, "uuid-verbose");
+    assert.ok(argv.includes("--verbose"));
+  });
+
   test("operator args first, then the exact host-authoritative stream flags", () => {
     const argv = buildClaudeArgv({ args: ["--model", "claude-sonnet-4"] }, "uuid-123");
     assert.deepEqual(argv, [
       "--model",
       "claude-sonnet-4",
       "-p",
+      "--verbose",
       "--output-format",
       "stream-json",
       "--input-format",
@@ -62,6 +68,7 @@ describe("buildClaudeArgv", () => {
     });
     assert.deepEqual(argv, [
       "-p",
+      "--verbose",
       "--output-format",
       "stream-json",
       "--input-format",
@@ -75,6 +82,16 @@ describe("buildClaudeArgv", () => {
       "/tmp/orbitory-mcp/mcp.json",
       "--strict-mcp-config",
     ]);
+  });
+
+  test("maps an allowlisted plan/model selection to fixed Claude flags", () => {
+    const argv = buildClaudeArgv({ args: [] }, "uuid-plan", undefined, {
+      launchProfileId: "plan",
+      intent: "plan",
+      modelId: "sonnet",
+      modelCliValue: "sonnet",
+    });
+    assert.deepEqual(argv.slice(0, 4), ["--model", "sonnet", "--permission-mode", "plan"]);
   });
 });
 

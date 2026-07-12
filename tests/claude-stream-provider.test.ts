@@ -79,7 +79,12 @@ describe("io config validation (Phase 16)", () => {
     assert.equal(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.sandbox.mode, "sandbox-exec");
     assert.equal(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.sandbox.required, true);
     assert.equal(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.sandbox.allowNetwork, true);
-    assert.deepEqual(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.envAllowlist, ["PATH", "HOME"]);
+    assert.deepEqual(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.envAllowlist, [
+      "PATH",
+      "HOME",
+      "USER",
+      "LOGNAME",
+    ]);
     assert.equal(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.maxRuntimeSeconds, 3600);
     assert.equal(CLAUDE_CODE_STREAM_EXAMPLE_CONFIG.workingDirectory, "../../orbitory-claude-stream-project");
 

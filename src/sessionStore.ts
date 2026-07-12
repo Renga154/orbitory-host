@@ -41,6 +41,13 @@ import {
   type MockScenario,
 } from "./providers/AgentProvider.js";
 import { ClaudeCodeStreamProvider } from "./providers/ClaudeCodeStreamProvider.js";
+import { CodexExecProvider } from "./providers/CodexExecProvider.js";
+import { projectCatalog } from "./projectCatalog.js";
+import {
+  loadProviderControls,
+  resolveProviderSelection,
+  type ResolvedProviderSelection,
+} from "./providerControls.js";
 import type {
   AgentSession,
   AgentType,
@@ -755,6 +762,11 @@ export class SessionStore extends EventEmitter {
     title: string,
     providerId?: string,
     initialPrompt?: string,
+    projectId?: string,
+    resumeId?: string,
+    requestId?: string,
+    launchProfileId?: string,
+    modelId?: string,
   ): AgentSession | undefined {
     const host = this.hosts.get(hostId);
     if (!host) {
@@ -763,17 +775,55 @@ export class SessionStore extends EventEmitter {
     }
 
     let terminalConfig: TerminalAgentConfig | undefined;
+    let codexThreadId: string | undefined;
+    let launchSelection: ResolvedProviderSelection | undefined;
     if (providerId !== undefined) {
       refreshAgentConfigs();
-      terminalConfig = agentConfigs.get(providerId);
+      if (projectId !== undefined) {
+        const resolved = projectCatalog.resolveLaunch(projectId, providerId, resumeId);
+        terminalConfig = resolved?.config;
+        codexThreadId = resolved?.codexThreadId;
+      } else if (resumeId === undefined) {
+        terminalConfig = agentConfigs.get(providerId);
+      }
       if (!terminalConfig) {
         this.emitError(
           null,
           "invalid_payload",
-          `Unknown or disabled providerId "${providerId}". Configure and enable it in orbitory.config.json first.`,
+          "Unknown, disabled, or stale project/provider selection. Refresh the catalog and try again.",
         );
         return undefined;
       }
+    } else if (projectId !== undefined || resumeId !== undefined) {
+      this.emitError(
+        null,
+        "invalid_payload",
+        "projectId and resumeId require a host-configured providerId.",
+      );
+      return undefined;
+    }
+
+    if (terminalConfig) {
+      launchSelection = resolveProviderSelection(
+        loadProviderControls(terminalConfig.agentType),
+        launchProfileId,
+        modelId,
+      );
+      if (!launchSelection) {
+        this.emitError(
+          null,
+          "invalid_payload",
+          "Unknown or mismatched launchProfileId/modelId for the selected provider.",
+        );
+        return undefined;
+      }
+    } else if (launchProfileId !== undefined || modelId !== undefined) {
+      this.emitError(
+        null,
+        "invalid_payload",
+        "launchProfileId and modelId require a host-configured providerId.",
+      );
+      return undefined;
     }
 
     const id = nextSessionId();
@@ -785,6 +835,14 @@ export class SessionStore extends EventEmitter {
     const session: AgentSession = {
       id,
       hostId,
+      ...(projectId !== undefined ? { projectId } : {}),
+      ...(providerId !== undefined ? { providerId } : {}),
+      ...(launchSelection !== undefined
+        ? {
+            launchProfileId: launchSelection.launchProfileId,
+            modelId: launchSelection.modelId,
+          }
+        : {}),
       title,
       agentType: resolvedAgentType,
       // Phase 16: terminal-backed sessions run a real process; providerId-less
@@ -818,6 +876,13 @@ export class SessionStore extends EventEmitter {
       payload: {
         id: session.id,
         hostId: session.hostId,
+        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
+        ...(session.providerId !== undefined ? { providerId: session.providerId } : {}),
+        ...(session.launchProfileId !== undefined
+          ? { launchProfileId: session.launchProfileId }
+          : {}),
+        ...(session.modelId !== undefined ? { modelId: session.modelId } : {}),
+        ...(requestId !== undefined ? { requestId } : {}),
         title: session.title,
         agentType: session.agentType,
         sessionKind: session.sessionKind,
@@ -834,15 +899,21 @@ export class SessionStore extends EventEmitter {
     // entry keeps the generic text path, byte-for-byte.
     const provider: AgentProvider = terminalConfig
       ? terminalConfig.io === "stream-json"
-        ? ClaudeCodeStreamProvider.forNewSession(session, terminalConfig)
+        ? ClaudeCodeStreamProvider.forNewSession(session, terminalConfig, launchSelection)
+        : terminalConfig.io === "codex-jsonl"
+          ? CodexExecProvider.forNewSession(
+              session,
+              terminalConfig,
+              codexThreadId,
+              launchSelection,
+            )
         : TerminalAgentProvider.forNewSession(session, terminalConfig)
       : MockAgentProvider.forNewSession(session, nextNewSessionScenario());
     this.wireProvider(id, provider);
 
     // docs/protocol.md §5: `initialPrompt` becomes the session's first user
-    // chat message. For a terminal-backed session that means the provider
-    // writes it to the (already spawned) child's stdin, exactly like any
-    // other chat.message — data to the process, never a command.
+    // chat message. The provider owns its transport (a running stream or a
+    // short-lived turn), but always treats this as prompt data, never a command.
     if (initialPrompt !== undefined && initialPrompt.trim().length > 0) {
       void provider.sendMessage(id, initialPrompt);
     }

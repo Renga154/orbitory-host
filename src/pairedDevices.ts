@@ -23,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** Current on-disk schema version for the paired-devices store. */
-export const PAIRED_DEVICES_STORE_VERSION = 1;
+export const PAIRED_DEVICES_STORE_VERSION = 2;
 
 /**
  * A paired-device record as persisted. `tokenHash` is a SHA-256 of the raw
@@ -35,6 +35,10 @@ export interface PairedDeviceRecord {
   tokenHash: string;
   createdAt: string;
   lastUsedAt: string | null;
+  /** First successful client authentication; null while this is only a pairing grant. */
+  activatedAt?: string | null;
+  /** SHA-256 of the client-held profile id. Never exposed by public record views. */
+  boundClientIdHash?: string | null;
   /** ISO 8601; `null` only when the token was issued with TTL disabled (dev). */
   expiresAt: string | null;
   /** ISO 8601 when revoked, else `null`. */
@@ -42,14 +46,19 @@ export interface PairedDeviceRecord {
 }
 
 /** A record view safe to show/log — never includes `tokenHash`. */
-export type PublicDeviceRecord = Omit<PairedDeviceRecord, "tokenHash">;
+export type PublicDeviceRecord = Omit<PairedDeviceRecord, "tokenHash" | "boundClientIdHash">;
 
 export interface StoreData {
   version: number;
   devices: PairedDeviceRecord[];
 }
 
-export type VerifyFailureReason = "missing" | "unknown" | "expired" | "revoked";
+export type VerifyFailureReason =
+  | "missing"
+  | "unknown"
+  | "expired"
+  | "revoked"
+  | "device_mismatch";
 
 export type VerifyResult =
   | { ok: true; record: PublicDeviceRecord }
@@ -95,7 +104,13 @@ export class FilePersistence implements Persistence {
     try {
       const raw = readFileSync(this.path, "utf8");
       const parsed = JSON.parse(raw) as StoreData;
-      if (!parsed || !Array.isArray(parsed.devices)) {
+      if (
+        !parsed ||
+        !Array.isArray(parsed.devices) ||
+        !Number.isInteger(parsed.version) ||
+        parsed.version < 1 ||
+        parsed.version > PAIRED_DEVICES_STORE_VERSION
+      ) {
         return emptyStore();
       }
       return parsed;
@@ -127,8 +142,9 @@ function defaultGenerateId(): string {
 }
 
 function toPublic(record: PairedDeviceRecord): PublicDeviceRecord {
-  const { tokenHash: _omit, ...pub } = record;
-  void _omit;
+  const { tokenHash: _tokenHash, boundClientIdHash: _clientHash, ...pub } = record;
+  void _tokenHash;
+  void _clientHash;
   return pub;
 }
 
@@ -138,6 +154,8 @@ export interface PairedDeviceStoreOptions {
   now?: () => Date;
   generateId?: () => string;
   generateToken?: () => string;
+  /** Sliding lifetime after first successful use. Defaults to 30 days. */
+  deviceTtlSeconds?: number;
 }
 
 export interface IssueParams {
@@ -156,12 +174,14 @@ export class PairedDeviceStore {
   private readonly now: () => Date;
   private readonly generateId: () => string;
   private readonly generateToken: () => string;
+  private readonly deviceTtlSeconds: number;
 
   constructor(opts: PairedDeviceStoreOptions) {
     this.persistence = opts.persistence;
     this.now = opts.now ?? (() => new Date());
     this.generateId = opts.generateId ?? defaultGenerateId;
     this.generateToken = opts.generateToken ?? defaultGenerateToken;
+    this.deviceTtlSeconds = opts.deviceTtlSeconds ?? 30 * 24 * 60 * 60;
   }
 
   /** Issue a new device token. Returns the RAW token once (never persisted). */
@@ -181,11 +201,14 @@ export class PairedDeviceStore {
       tokenHash: hashToken(rawToken),
       createdAt: nowIso,
       lastUsedAt: null,
+      activatedAt: null,
+      boundClientIdHash: null,
       expiresAt,
       revokedAt: null,
     };
 
     const data = this.persistence.load();
+    data.version = PAIRED_DEVICES_STORE_VERSION;
     data.devices.push(record);
     this.persistence.save(data);
 
@@ -196,7 +219,7 @@ export class PairedDeviceStore {
    * Verify a presented raw token. Rejects unknown / revoked / expired tokens;
    * on success stamps `lastUsedAt` (best-effort) and returns the public record.
    */
-  verify(rawToken: string | undefined | null): VerifyResult {
+  verify(rawToken: string | undefined | null, clientId?: string): VerifyResult {
     if (!rawToken) {
       return { ok: false, reason: "missing" };
     }
@@ -219,7 +242,24 @@ export class PairedDeviceStore {
         return { ok: false, reason: "expired" };
       }
     }
-    record.lastUsedAt = this.now().toISOString();
+    const normalizedClientId = clientId?.trim();
+    if (record.boundClientIdHash) {
+      if (!normalizedClientId || record.boundClientIdHash !== hashToken(normalizedClientId)) {
+        return { ok: false, reason: "device_mismatch" };
+      }
+    } else if (normalizedClientId) {
+      record.boundClientIdHash = hashToken(normalizedClientId);
+    }
+
+    const usedAt = this.now();
+    const usedAtIso = usedAt.toISOString();
+    record.activatedAt ??= usedAtIso;
+    record.lastUsedAt = usedAtIso;
+    record.expiresAt =
+      this.deviceTtlSeconds > 0
+        ? new Date(usedAt.getTime() + this.deviceTtlSeconds * 1000).toISOString()
+        : null;
+    data.version = PAIRED_DEVICES_STORE_VERSION;
     this.persistence.save(data);
     return { ok: true, record: toPublic(record) };
   }
@@ -232,6 +272,7 @@ export class PairedDeviceStore {
       return false;
     }
     record.revokedAt = this.now().toISOString();
+    data.version = PAIRED_DEVICES_STORE_VERSION;
     this.persistence.save(data);
     return true;
   }

@@ -26,6 +26,7 @@ export const PUBLIC_ALLOWLIST = Object.freeze([
   "scripts/demo-agent.js",
   "scripts/fake-claude-code-stream.js",
   "scripts/fake-claude-code.js",
+  "scripts/fake-codex-exec.js",
   "scripts/fake-codex.js",
   "scripts/generate-dev-cert.mjs",
   "scripts/orbitory-approval-bridge.js",
@@ -137,6 +138,7 @@ function ensureDestination(outDir, force) {
   }
 
   for (const entry of entries) {
+    if (entry === ".git") continue;
     fs.rmSync(path.join(outDir, entry), { recursive: true, force: true });
   }
 }

@@ -104,6 +104,21 @@ export type ProviderUnavailableReason =
  */
 export type ProviderNetworkPolicy = "denied" | "allowed" | "not_applicable";
 
+export type ProviderLaunchIntent = "work" | "plan" | "review";
+
+export interface ProviderLaunchProfileDescriptor {
+  id: string;
+  intent: ProviderLaunchIntent;
+  isDefault: boolean;
+  requiresStartConfirmation: boolean;
+}
+
+export interface ProviderModelOptionDescriptor {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
+}
+
 /**
  * A **sanitized** view of one host-configured provider, safe to send to the
  * (semi-trusted) iOS client. It carries only display/control metadata — never
@@ -138,6 +153,35 @@ export interface ProviderDescriptor {
   riskLevel: RiskLevel;
   /** Stable warning codes, localized client-side (e.g. `unsandboxed`, `network_allowed`). */
   warnings: string[];
+  /** Provider-scoped allowlists. The client can select ids, never raw CLI flags. */
+  launchProfiles: ProviderLaunchProfileDescriptor[];
+  models: ProviderModelOptionDescriptor[];
+}
+
+/**
+ * Sanitized project a paired client may select. `id` is a process-local
+ * opaque handle; no path-derived value crosses the wire.
+ */
+export interface ProjectDescriptor {
+  id: string;
+  hostId: string;
+  displayName: string;
+  providerIds: string[];
+  defaultProviderId: string | null;
+  startable: boolean;
+  riskLevel: RiskLevel;
+  warnings: string[];
+  resumableSessionCount: number;
+}
+
+/** Sanitized handle for a host-known Codex thread that can be resumed. */
+export interface ResumableSessionDescriptor {
+  id: string;
+  projectId: string;
+  providerId: string;
+  title: string;
+  agentType: AgentType;
+  updatedAt: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -197,6 +241,12 @@ export interface ChangedFile {
 export interface AgentSession {
   id: string;
   hostId: string;
+  /** Opaque project handle selected at launch. Optional for older/mock sessions. */
+  projectId?: string;
+  /** Host-configured provider and selected controls; opaque/sanitized for clients. */
+  providerId?: string;
+  launchProfileId?: string;
+  modelId?: string;
   title: string;
   agentType: AgentType;
   /** Optional (Phase 16). Absent ⇒ unknown; clients show no badge. */
@@ -240,6 +290,8 @@ export interface Envelope<T> {
 
 export interface ClientHelloPayload {
   token?: string;
+  /** Opaque id of the saved client profile; used only to bind per-device credentials. */
+  clientId?: string;
   /** Informational only (e.g. "Orbitory iOS") — never trusted for anything. */
   clientName?: string;
   clientVersion?: string;
@@ -291,6 +343,8 @@ export interface SessionStartPayload {
   hostId: string;
   agentType: string;
   title: string;
+  /** Optional client-generated correlation token; echoed in `session.created`. */
+  requestId?: string;
   /**
    * Id of an already host-configured, `enabled` `TerminalAgentConfig` (see
    * `agentConfig.ts`) to drive this session with `TerminalAgentProvider`
@@ -300,10 +354,16 @@ export interface SessionStartPayload {
    * command or argument list itself.
    */
   providerId?: string;
+  /** Opaque host-issued project handle from `projects.snapshot`; never a path. */
+  projectId?: string;
+  /** Opaque host-issued resumable-session handle; never a Codex thread id. */
+  resumeId?: string;
+  /** Provider-scoped ids from the latest providers.snapshot. */
+  launchProfileId?: string;
+  modelId?: string;
   /**
-   * Delivered as the session's first user chat message once the provider is
-   * running (for a terminal-backed session: written to the child's stdin,
-   * exactly like any other chat.message — data, never a command).
+   * Delivered as the session's first user chat message. The provider owns the
+   * transport, but always treats this as prompt data, never a command.
    */
   initialPrompt?: string;
 }
@@ -312,6 +372,9 @@ export type SessionRequestSummaryPayload = Record<string, never>;
 
 /** Client asks the server to (re-)send `providers.snapshot`. No fields. */
 export type ProvidersRequestPayload = Record<string, never>;
+
+/** Client asks the server to refresh and resend `projects.snapshot`. */
+export type ProjectsRequestPayload = Record<string, never>;
 
 // ---------------------------------------------------------------------------
 // Client -> server messages (discriminated union)
@@ -353,6 +416,12 @@ export interface ClientProvidersRequestMessage
   sessionId: null;
 }
 
+export interface ClientProjectsRequestMessage
+  extends Envelope<ProjectsRequestPayload> {
+  type: "projects.request";
+  sessionId: null;
+}
+
 export interface ClientAuditRequestMessage extends Envelope<AuditRequestPayload> {
   type: "audit.request";
   sessionId: null;
@@ -367,6 +436,7 @@ export type ClientMessage =
   | ClientSessionStartMessage
   | ClientSessionRequestSummaryMessage
   | ClientProvidersRequestMessage
+  | ClientProjectsRequestMessage
   | ClientAuditRequestMessage;
 
 // ---------------------------------------------------------------------------
@@ -391,6 +461,12 @@ export interface ProvidersSnapshotPayload {
   providers: ProviderDescriptor[];
 }
 
+/** Sanitized host-authorized project and resume catalog. */
+export interface ProjectsSnapshotPayload {
+  projects: ProjectDescriptor[];
+  resumableSessions: ResumableSessionDescriptor[];
+}
+
 /**
  * Flat announcement of a brand-new session. Mirrors `AgentSession`'s
  * top-level scalar fields only (no `changedFiles`, `testStatus`,
@@ -400,6 +476,12 @@ export interface ProvidersSnapshotPayload {
 export interface SessionCreatedPayload {
   id: string;
   hostId: string;
+  projectId?: string;
+  providerId?: string;
+  launchProfileId?: string;
+  modelId?: string;
+  /** Echo of a valid `session.start.requestId`; correlation only. */
+  requestId?: string;
   title: string;
   agentType: AgentType;
   /** Optional (Phase 16). See `SessionKind`. */
@@ -586,6 +668,12 @@ export interface ServerProvidersSnapshotMessage
   sessionId: null;
 }
 
+export interface ServerProjectsSnapshotMessage
+  extends Envelope<ProjectsSnapshotPayload> {
+  type: "projects.snapshot";
+  sessionId: null;
+}
+
 export interface ServerSessionCreatedMessage
   extends Envelope<SessionCreatedPayload> {
   type: "session.created";
@@ -686,6 +774,7 @@ export type ServerMessage =
   | ServerHelloMessage
   | ServerSessionSnapshotMessage
   | ServerProvidersSnapshotMessage
+  | ServerProjectsSnapshotMessage
   | ServerSessionCreatedMessage
   | ServerChatMessageMessage
   | ServerSessionUpdatedMessage

@@ -1,0 +1,31 @@
+{
+  "type": "projects.snapshot",
+  "version": 1,
+  "timestamp": "2026-07-01T10:00:00.400Z",
+  "sessionId": null,
+  "payload": {
+    "projects": [
+      {
+        "id": "project_fixture_001",
+        "hostId": "host_001",
+        "displayName": "Orbitory",
+        "providerIds": ["codex-local"],
+        "defaultProviderId": "codex-local",
+        "startable": true,
+        "riskLevel": "high",
+        "warnings": ["codex_history_experimental", "broad_project_access"],
+        "resumableSessionCount": 1
+      }
+    ],
+    "resumableSessions": [
+      {
+        "id": "resume_fixture_001",
+        "projectId": "project_fixture_001",
+        "providerId": "codex-local",
+        "title": "Fix token refresh",
+        "agentType": "codex",
+        "updatedAt": "2026-07-01T09:55:00.000Z"
+      }
+    ]
+  }
+}

@@ -31,6 +31,7 @@ function makeStore(persistence = new MemoryPersistence()) {
     now: () => clock,
     generateId: () => `dev_${++idN}`,
     generateToken: () => `raw-token-${++tokN}`,
+    deviceTtlSeconds: 30 * 24 * 60 * 60,
   });
   return {
     store,
@@ -81,6 +82,38 @@ describe("paired-devices: the raw token is never persisted", () => {
 });
 
 describe("paired-devices: verify", () => {
+  test("promotes a short-lived pairing credential to a sliding device credential on first use", () => {
+    const { store, setClock } = makeStore();
+    const { rawToken } = store.issue({ deviceName: "iPhone", ttlSeconds: 600 });
+
+    setClock("2026-07-04T00:05:00.000Z");
+    const activated = store.verify(rawToken, "ios-profile-1");
+    assert.equal(activated.ok, true);
+    if (activated.ok) {
+      assert.equal(activated.record.activatedAt, "2026-07-04T00:05:00.000Z");
+      assert.equal(activated.record.expiresAt, "2026-08-03T00:05:00.000Z");
+    }
+
+    setClock("2026-07-20T12:00:00.000Z");
+    const refreshed = store.verify(rawToken, "ios-profile-1");
+    assert.equal(refreshed.ok, true);
+    if (refreshed.ok) {
+      assert.equal(refreshed.record.expiresAt, "2026-08-19T12:00:00.000Z");
+    }
+  });
+
+  test("binds an activated credential to the first saved client profile", () => {
+    const { store } = makeStore();
+    const { rawToken } = store.issue({ deviceName: "iPhone", ttlSeconds: 600 });
+
+    assert.equal(store.verify(rawToken, "ios-profile-1").ok, true);
+    assert.deepEqual(store.verify(rawToken, "ios-profile-2"), {
+      ok: false,
+      reason: "device_mismatch",
+    });
+    assert.deepEqual(store.verify(rawToken), { ok: false, reason: "device_mismatch" });
+  });
+
   test("accepts the raw token and stamps lastUsedAt", () => {
     const { store, setClock } = makeStore();
     const { rawToken, record } = store.issue({ deviceName: "iPhone", ttlSeconds: 600 });
@@ -108,8 +141,6 @@ describe("paired-devices: verify", () => {
   test("rejects an expired token", () => {
     const { store, setClock } = makeStore();
     const { rawToken } = store.issue({ deviceName: "iPhone", ttlSeconds: 600 });
-    setClock("2026-07-04T00:09:59.000Z");
-    assert.equal(store.verify(rawToken).ok, true, "still valid one second before expiry");
     setClock("2026-07-04T00:10:01.000Z");
     assert.deepEqual(store.verify(rawToken), { ok: false, reason: "expired" });
   });

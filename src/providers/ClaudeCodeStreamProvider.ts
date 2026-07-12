@@ -46,6 +46,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { TerminalAgentConfig } from "../agentConfig.js";
+import type { ResolvedProviderSelection } from "../providerControls.js";
 import {
   ApprovalBroker,
   approvalPendingSummary,
@@ -56,7 +57,11 @@ import {
 } from "../approvalBridge.js";
 import { PAIRING_TOKEN, PORT } from "../config.js";
 import { scrubSecrets, StreamScrubber } from "../scrubbing.js";
-import { describeSandbox, wrapCommandForSandbox } from "../sandbox.js";
+import {
+  agentStateWritablePaths,
+  describeSandbox,
+  wrapCommandForSandbox,
+} from "../sandbox.js";
 import {
   buildTerminalChildEnv,
   envelope,
@@ -162,7 +167,11 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
   private readonly broker: ApprovalBroker;
   private readonly copy: AgentPresetCopy;
 
-  private constructor(session: AgentSession, config: TerminalAgentConfig) {
+  private constructor(
+    session: AgentSession,
+    config: TerminalAgentConfig,
+    private readonly selection?: ResolvedProviderSelection,
+  ) {
     this.session = session;
     this.config = config;
     this.displayName = `Claude Code Stream (${config.displayName})`;
@@ -184,8 +193,9 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
   static forNewSession(
     initialSession: AgentSession,
     config: TerminalAgentConfig,
+    selection?: ResolvedProviderSelection,
   ): ClaudeCodeStreamProvider {
-    const provider = new ClaudeCodeStreamProvider(initialSession, config);
+    const provider = new ClaudeCodeStreamProvider(initialSession, config, selection);
     provider.spawnProcess();
     return provider;
   }
@@ -217,12 +227,21 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
     // Chat is data on stdin — a stream-json user event, never a shell command.
     if (this.child && !this.child.killed && this.child.stdin && this.child.stdin.writable) {
       try {
-        this.child.stdin.write(serializeUserMessage(text));
+        this.child.stdin.write(serializeUserMessage(this.framePrompt(text)));
       } catch {
         // Best-effort, same as TerminalAgentProvider: an EPIPE here just means
         // this message wasn't delivered; it stays in chat history.
       }
     }
+  }
+
+  private framePrompt(text: string): string {
+    if (this.selection?.intent !== "review") return text;
+    return [
+      "Orbitory review mode: inspect and report findings only. Do not modify files.",
+      "",
+      text,
+    ].join("\n");
   }
 
   async stopSession(sessionId: string): Promise<void> {
@@ -271,7 +290,12 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
     // before sessionStore subscribes (same reasoning as TerminalAgentProvider).
     queueMicrotask(() => {
       if (this.isTerminal(this.session.status)) return;
-      this.emitTerminalLine(describeSandbox(this.config.sandbox), "stdout");
+      this.emitTerminalLine(
+        describeSandbox(this.config.sandbox, {
+          providerStateWrites: agentStateWritablePaths(this.config.agentType).length > 0,
+        }),
+        "stdout",
+      );
       this.emitTerminalLine("[orbitory] approval bridge: permission-prompt-tool", "stdout");
     });
 
@@ -299,10 +323,15 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
       },
     });
 
-    const argv = buildClaudeArgv(this.config, randomUUID(), {
-      toolName: APPROVAL_PROMPT_TOOL_NAME,
-      mcpConfigPath,
-    });
+    const argv = buildClaudeArgv(
+      this.config,
+      randomUUID(),
+      {
+        toolName: APPROVAL_PROMPT_TOOL_NAME,
+        mcpConfigPath,
+      },
+      this.selection,
+    );
     // Container mode is rejected for io "stream-json" at config load (see
     // agentConfig.ts), so no containerOpts are ever needed here.
     const wrapped = wrapCommandForSandbox(
@@ -310,6 +339,8 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
       argv,
       this.config.sandbox,
       this.config.workingDirectory,
+      undefined,
+      agentStateWritablePaths("claudeCode"),
     );
     this.detached = wrapped.detached;
 

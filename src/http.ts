@@ -12,8 +12,14 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getAuditStore, recordAuthFailed } from "./audit.js";
 import { verifyPresentedToken } from "./auth.js";
 import { redactToken } from "./logging.js";
+import { projectCatalog } from "./projectCatalog.js";
 import { sessionStore } from "./sessionStore.js";
-import type { AgentSession, AuditEvent, ProviderDescriptor } from "./types.js";
+import type {
+  AgentSession,
+  AuditEvent,
+  ProjectsSnapshotPayload,
+  ProviderDescriptor,
+} from "./types.js";
 
 const processStartedAtMs = Date.now();
 
@@ -30,6 +36,8 @@ interface SessionsResponse {
 interface ProvidersResponse {
   providers: ProviderDescriptor[];
 }
+
+type ProjectsResponse = ProjectsSnapshotPayload;
 
 interface AuditResponse {
   events: AuditEvent[];
@@ -65,6 +73,18 @@ function extractRestToken(request: FastifyRequest): string | undefined {
 }
 
 /**
+ * Saved device credentials are bound to the same opaque profile id used by
+ * `client.hello`. REST clients present it separately so the credential cannot
+ * be replayed from a different saved profile.
+ */
+function extractRestClientId(request: FastifyRequest): string | undefined {
+  const value = request.headers["x-orbitory-client-id"];
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value)
+    ? value
+    : undefined;
+}
+
+/**
  * Fastify `preHandler` that enforces pairing-token auth for REST routes
  * that require it (`GET /sessions`, `GET /providers`, and `GET /audit`).
  * Never logs the full token value — only the redacted last-4-characters
@@ -77,7 +97,7 @@ function requirePairingToken(
 ): void {
   const token = extractRestToken(request);
 
-  const auth = verifyPresentedToken(token);
+  const auth = verifyPresentedToken(token, extractRestClientId(request));
   if (!auth.ok) {
     request.log.warn(
       `[orbitory-host-agent] REST auth failed (${auth.reason}) for token ${redactToken(token)}; rejecting request.`,
@@ -131,6 +151,12 @@ export async function registerHttpRoutes(
         providers: sessionStore.getProviderDescriptors(),
       };
     },
+  );
+
+  app.get(
+    "/projects",
+    { preHandler: requirePairingToken },
+    async (): Promise<ProjectsResponse> => projectCatalog.snapshot(true),
   );
 
   // Phase 10: sanitized audit log. Same pairing-token auth as /sessions.

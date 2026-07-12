@@ -1,7 +1,7 @@
 {
   "name": "orbitory-host",
   "type": "module",
-  "version": "0.1.3",
+  "version": "0.1.6",
   "description": "Local host-agent for Orbitory, the iPhone workroom for AI coding agents.",
   "license": "MIT",
   "repository": {

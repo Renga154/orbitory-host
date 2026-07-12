@@ -155,8 +155,9 @@ export const CLAUDE_CODE_EXAMPLE_CONFIG = {
  *   writes to the working directory but NOT reads, and the open network is an
  *   exfiltration channel. That is why this stays disabled, points at a
  *   disposable project, and is never described as "safe".
- * - `envAllowlist: ["PATH", "HOME"]` — the minimum a login-state CLI needs;
- *   the pairing token is stripped unconditionally regardless.
+ * - `envAllowlist: ["PATH", "HOME", "USER", "LOGNAME"]` — the minimum
+ *   identity/login context verified against the runtime CLI; the pairing
+ *   token is stripped unconditionally regardless.
  * - `approvalTimeoutSeconds: 300` — an unanswered permission request DENIES
  *   after 5 minutes (fail closed).
  */
@@ -171,7 +172,7 @@ export const CLAUDE_CODE_STREAM_EXAMPLE_CONFIG = {
   io: "stream-json",
   maxRuntimeSeconds: 3600,
   approvalTimeoutSeconds: 300,
-  envAllowlist: ["PATH", "HOME"] as string[],
+  envAllowlist: ["PATH", "HOME", "USER", "LOGNAME"] as string[],
   sandbox: {
     mode: "sandbox-exec",
     required: true,

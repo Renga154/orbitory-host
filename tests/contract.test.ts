@@ -61,16 +61,28 @@ interface KeySpec {
 
 const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
   // -- Client -> server (src/types.ts ClientHelloPayload etc.) --------------
-  "client.hello": { required: [], optional: ["token", "clientName", "clientVersion", "platform"] },
+  "client.hello": {
+    required: [],
+    optional: ["token", "clientId", "clientName", "clientVersion", "platform"],
+  },
   "chat.message": { required: ["text"], optional: ["messageId", "role"] },
   "approval.decision": { required: ["approvalId", "decision", "scope"] },
   "session.stop": { required: [], optional: ["reason"] },
   "session.start": {
     required: ["hostId", "agentType", "title"],
-    optional: ["providerId", "initialPrompt"],
+    optional: [
+      "providerId",
+      "launchProfileId",
+      "modelId",
+      "projectId",
+      "resumeId",
+      "requestId",
+      "initialPrompt",
+    ],
   },
   "session.request_summary": { required: [] }, // SessionRequestSummaryPayload = Record<string, never>
   "providers.request": { required: [] }, // ProvidersRequestPayload = Record<string, never>
+  "projects.request": { required: [] },
   "audit.request": { required: [] }, // AuditRequestPayload = Record<string, never>
 
   // -- Server -> client (src/types.ts Server*Payload) -----------------------
@@ -79,6 +91,7 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
   },
   "session.snapshot": { required: ["hosts", "sessions"] },
   "providers.snapshot": { required: ["providers"] },
+  "projects.snapshot": { required: ["projects", "resumableSessions"] },
   "session.created": {
     required: [
       "id",
@@ -91,7 +104,14 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
       "createdAt",
       "updatedAt",
     ],
-    optional: ["sessionKind"],
+    optional: [
+      "sessionKind",
+      "providerId",
+      "launchProfileId",
+      "modelId",
+      "projectId",
+      "requestId",
+    ],
   },
   "session.updated": {
     required: [],
@@ -152,6 +172,8 @@ const DESCRIPTOR_KEYS = [
   "networkPolicy",
   "riskLevel",
   "warnings",
+  "launchProfiles",
+  "models",
 ].sort();
 
 /**
@@ -221,6 +243,54 @@ describe("providers.snapshot descriptor sanitization (Phase 6, fixture)", () => 
       fs.readFileSync(path.join(FIXTURES_DIR, "providers.snapshot.json"), "utf8"),
     ) as Envelope<unknown>;
     assertProvidersPayloadSanitized(fixture.payload, "providers.snapshot.json");
+  });
+});
+
+const PROJECT_DESCRIPTOR_KEYS = [
+  "id",
+  "hostId",
+  "displayName",
+  "providerIds",
+  "defaultProviderId",
+  "startable",
+  "riskLevel",
+  "warnings",
+  "resumableSessionCount",
+].sort();
+const RESUME_DESCRIPTOR_KEYS = [
+  "id",
+  "projectId",
+  "providerId",
+  "title",
+  "agentType",
+  "updatedAt",
+].sort();
+
+describe("projects.snapshot sanitization", () => {
+  test("fixture carries only opaque project/resume metadata", () => {
+    const fixture = JSON.parse(
+      fs.readFileSync(path.join(FIXTURES_DIR, "projects.snapshot.json"), "utf8"),
+    ) as { payload: { projects: unknown[]; resumableSessions: unknown[] } };
+    for (const project of fixture.payload.projects) {
+      assert.deepEqual(keysOf(project), PROJECT_DESCRIPTOR_KEYS);
+    }
+    for (const session of fixture.payload.resumableSessions) {
+      assert.deepEqual(keysOf(session), RESUME_DESCRIPTOR_KEYS);
+    }
+    const wire = JSON.stringify(fixture.payload).toLowerCase();
+    for (const forbidden of [
+      '"path"',
+      '"cwd"',
+      '"workingdirectory"',
+      '"command"',
+      '"args"',
+      '"env"',
+      '"token"',
+      '"threadid"',
+      '"sessionid"',
+    ]) {
+      assert.equal(wire.includes(forbidden), false, `projects.snapshot leaked ${forbidden}`);
+    }
   });
 });
 
@@ -321,6 +391,8 @@ describe("live server output vs. fixtures (real regression guard)", () => {
     observed.set("session.snapshot", snapshot);
     const providers = await client.waitFor((e) => e.type === "providers.snapshot");
     observed.set("providers.snapshot", providers);
+    const projects = await client.waitFor((e) => e.type === "projects.snapshot");
+    observed.set("projects.snapshot", projects);
 
     const snapshotPayload = snapshot.payload as { hosts: HostInfo[]; sessions: AgentSession[] };
     const host = snapshotPayload.hosts[0];
@@ -358,7 +430,12 @@ describe("live server output vs. fixtures (real regression guard)", () => {
         version: 1,
         timestamp: new Date().toISOString(),
         sessionId: null,
-        payload: { hostId: host.id, agentType: "claudeCode", title: `Contract test run ${attempt}` },
+        payload: {
+          hostId: host.id,
+          agentType: "claudeCode",
+          title: `Contract test run ${attempt}`,
+          requestId: "start_fixture_001",
+        },
       });
 
       const created = await client.waitFor((e) => e.type === "session.created", 5000);
@@ -447,6 +524,7 @@ describe("live server output vs. fixtures (real regression guard)", () => {
     { type: "server.hello", fixture: "server.hello.json" },
     { type: "session.snapshot", fixture: "session.snapshot.json" },
     { type: "providers.snapshot", fixture: "providers.snapshot.json" },
+    { type: "projects.snapshot", fixture: "projects.snapshot.json" },
     { type: "chat.message", fixture: "chat.message.assistant.json" },
     { type: "session.created", fixture: "session.created.json" },
     { type: "agent.status.changed", fixture: "agent.status.changed.json" },

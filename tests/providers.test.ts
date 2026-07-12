@@ -29,7 +29,13 @@ import {
   refreshAgentConfigs,
 } from "../src/agentConfig.js";
 import { SessionStore } from "../src/sessionStore.js";
-import type { HostInfo, AgentSession, ProviderDescriptor } from "../src/types.js";
+import type {
+  HostInfo,
+  AgentSession,
+  ProjectDescriptor,
+  ProviderDescriptor,
+  ResumableSessionDescriptor,
+} from "../src/types.js";
 
 const PAIRING_TOKEN = process.env["ORBITORY_PAIRING_TOKEN"];
 assert.ok(PAIRING_TOKEN, "ORBITORY_PAIRING_TOKEN must be set for tests to run.");
@@ -129,7 +135,7 @@ describe("loadProviderDescriptors (Phase 6)", () => {
   test("descriptors expose NO command/args/env/image/workingDirectory/paths", () => {
     assertNoSensitiveKeys({ providers: descriptors }, "loadProviderDescriptors");
     for (const d of descriptors) {
-      // Spot-check: the object literally has only the 12 sanitized keys.
+      // Spot-check: the object literally has only the sanitized control/display keys.
       assert.deepEqual(
         Object.keys(d).sort(),
         [
@@ -137,6 +143,8 @@ describe("loadProviderDescriptors (Phase 6)", () => {
           "displayName",
           "enabled",
           "id",
+          "launchProfiles",
+          "models",
           "networkPolicy",
           "riskLevel",
           "sandboxMode",
@@ -228,6 +236,34 @@ describe("GET /providers (Phase 6)", () => {
   });
 });
 
+describe("GET /projects", () => {
+  let server: TestServer;
+  before(async () => {
+    server = await startTestServer();
+  });
+  after(async () => {
+    await server.close();
+  });
+
+  test("requires the pairing token", async () => {
+    assert.equal((await fetch(`${server.httpUrl}/projects`)).status, 401);
+    assert.equal((await fetch(`${server.httpUrl}/projects?token=nope`)).status, 401);
+  });
+
+  test("returns only sanitized project and resume metadata", async () => {
+    const response = await fetch(
+      `${server.httpUrl}/projects?token=${encodeURIComponent(PAIRING_TOKEN!)}`,
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      projects: ProjectDescriptor[];
+      resumableSessions: ResumableSessionDescriptor[];
+    };
+    assert.ok(body.projects.length > 0);
+    assertNoSensitiveKeys(body, "GET /projects");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // providers.snapshot over WebSocket + hostile session.start.
 // ---------------------------------------------------------------------------
@@ -271,6 +307,106 @@ describe("providers.snapshot + start behavior (Phase 6)", () => {
       () => client.received.filter((e) => e.type === "providers.snapshot").length > count,
       3000,
     );
+  });
+
+  test("projects.snapshot is sanitized and projects.request refreshes it", async () => {
+    const initial = client.received.find((e) => e.type === "projects.snapshot");
+    assert.ok(initial, "handshake must include projects.snapshot");
+    assertNoSensitiveKeys(initial.payload, "projects.snapshot (hello)");
+    const projects = (initial.payload as { projects: ProjectDescriptor[] }).projects;
+    assert.ok(projects.some((project) => project.providerIds.includes("echo-success")));
+
+    const count = client.received.filter((e) => e.type === "projects.snapshot").length;
+    client.send({
+      type: "projects.request",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: {},
+    });
+    await client.waitFor(
+      () => client.received.filter((e) => e.type === "projects.snapshot").length > count,
+      3000,
+    );
+  });
+
+  test("project starts echo requestId and reject stale or malformed selections", async () => {
+    const snapshot = client.received.find((e) => e.type === "projects.snapshot");
+    const projects = (snapshot?.payload as { projects?: ProjectDescriptor[] } | undefined)?.projects ?? [];
+    const project = projects.find((candidate) => candidate.providerIds.includes("echo-success"));
+    assert.ok(project);
+
+    client.send({
+      type: "session.start",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: {
+        hostId: hosts[0]!.id,
+        agentType: "custom",
+        title: "correlated project start",
+        providerId: "echo-success",
+        projectId: project.id,
+        requestId: "start_provider_test_001",
+      },
+    });
+    const created = await client.waitFor(
+      (e) =>
+        e.type === "session.created" &&
+        (e.payload as { requestId?: string }).requestId === "start_provider_test_001",
+      3000,
+    );
+    const createdPayload = created.payload as {
+      projectId?: string;
+      providerId?: string;
+      launchProfileId?: string;
+      modelId?: string;
+    };
+    assert.equal(createdPayload.projectId, project.id);
+    assert.equal(createdPayload.providerId, "echo-success");
+    assert.equal(createdPayload.launchProfileId, "work");
+    assert.equal(createdPayload.modelId, "default");
+
+    client.send({
+      type: "session.start",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: {
+        hostId: hosts[0]!.id,
+        agentType: "custom",
+        title: "stale project",
+        providerId: "echo-success",
+        projectId: "project_stale",
+      },
+    });
+    const stale = await client.waitFor(
+      (e) => e.type === "error" && (e.payload as { code?: string }).code === "invalid_payload",
+      3000,
+    );
+    assert.equal(stale.type, "error");
+
+    client.send({
+      type: "session.start",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: {
+        hostId: hosts[0]!.id,
+        agentType: "custom",
+        title: "bad correlation id",
+        providerId: "echo-success",
+        projectId: project.id,
+        requestId: "bad request id with spaces",
+      },
+    });
+    const malformed = await client.waitFor(
+      (e) =>
+        e.type === "error" &&
+        (e.payload as { message?: string }).message?.includes("requestId") === true,
+      3000,
+    );
+    assert.equal(malformed.type, "error");
   });
 
   test("a disabled provider cannot be started (fail closed)", async () => {

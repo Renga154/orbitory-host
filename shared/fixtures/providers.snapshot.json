@@ -17,7 +17,22 @@
         "sandboxSupported": true,
         "networkPolicy": "denied",
         "riskLevel": "low",
-        "warnings": ["reads_not_confined"]
+        "warnings": ["reads_not_confined"],
+        "launchProfiles": [
+          {
+            "id": "work",
+            "intent": "work",
+            "isDefault": true,
+            "requiresStartConfirmation": true
+          }
+        ],
+        "models": [
+          {
+            "id": "default",
+            "displayName": "Default",
+            "isDefault": true
+          }
+        ]
       },
       {
         "id": "container-demo",
@@ -31,7 +46,22 @@
         "sandboxSupported": true,
         "networkPolicy": "denied",
         "riskLevel": "low",
-        "warnings": []
+        "warnings": [],
+        "launchProfiles": [
+          {
+            "id": "work",
+            "intent": "work",
+            "isDefault": true,
+            "requiresStartConfirmation": true
+          }
+        ],
+        "models": [
+          {
+            "id": "default",
+            "displayName": "Default",
+            "isDefault": true
+          }
+        ]
       },
       {
         "id": "claude-code-disposable",
@@ -45,7 +75,49 @@
         "sandboxSupported": true,
         "networkPolicy": "denied",
         "riskLevel": "low",
-        "warnings": ["real_cli_disposable_only"]
+        "warnings": ["real_cli_disposable_only"],
+        "launchProfiles": [
+          {
+            "id": "work",
+            "intent": "work",
+            "isDefault": true,
+            "requiresStartConfirmation": true
+          },
+          {
+            "id": "plan",
+            "intent": "plan",
+            "isDefault": false,
+            "requiresStartConfirmation": false
+          },
+          {
+            "id": "review",
+            "intent": "review",
+            "isDefault": false,
+            "requiresStartConfirmation": false
+          }
+        ],
+        "models": [
+          {
+            "id": "default",
+            "displayName": "Default",
+            "isDefault": true
+          },
+          {
+            "id": "sonnet",
+            "displayName": "Sonnet",
+            "isDefault": false
+          },
+          {
+            "id": "opus",
+            "displayName": "Opus",
+            "isDefault": false
+          },
+          {
+            "id": "fable",
+            "displayName": "Fable",
+            "isDefault": false
+          }
+        ]
       },
       {
         "id": "codex-disposable",
@@ -59,7 +131,39 @@
         "sandboxSupported": false,
         "networkPolicy": "denied",
         "riskLevel": "low",
-        "warnings": ["real_cli_disposable_only", "sandbox_unsupported"]
+        "warnings": ["real_cli_disposable_only", "sandbox_unsupported"],
+        "launchProfiles": [
+          {
+            "id": "work",
+            "intent": "work",
+            "isDefault": true,
+            "requiresStartConfirmation": true
+          },
+          {
+            "id": "plan",
+            "intent": "plan",
+            "isDefault": false,
+            "requiresStartConfirmation": false
+          },
+          {
+            "id": "review",
+            "intent": "review",
+            "isDefault": false,
+            "requiresStartConfirmation": false
+          }
+        ],
+        "models": [
+          {
+            "id": "default",
+            "displayName": "Default",
+            "isDefault": true
+          },
+          {
+            "id": "gpt-5.5",
+            "displayName": "GPT-5.5",
+            "isDefault": false
+          }
+        ]
       }
     ]
   }

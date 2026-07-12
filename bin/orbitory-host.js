@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -26,6 +28,10 @@ const supportedOptions = new Set([
   "-y",
   "--login-device",
   "--login-browser",
+  "--include-codex-projects",
+  "--include-recent-projects",
+  "--list-providers",
+  "--remove-provider",
 ]);
 const wantsHelp = extra.includes("--help") || extra.includes("-h");
 const wantsDemo = extra.includes("--demo");
@@ -34,9 +40,19 @@ const wantsSetup = extra.includes("--setup");
 const wantsYes = extra.includes("--yes") || extra.includes("-y");
 const wantsLoginDevice = extra.includes("--login-device");
 const wantsLoginBrowser = extra.includes("--login-browser");
+const wantsIncludeCodexProjects = extra.includes("--include-codex-projects");
+const wantsIncludeRecentProjects = extra.includes("--include-recent-projects");
+const wantsListProviders = extra.includes("--list-providers");
+const removeProviderIndex = extra.indexOf("--remove-provider");
+const wantsRemoveProvider = removeProviderIndex >= 0;
+const removeProviderId = wantsRemoveProvider ? extra[removeProviderIndex + 1] : undefined;
 const setupProviderArg = extra.find((option) => setupProviderAliases.has(option));
 const unknownOption = extra.find((option) => option.startsWith("-") && !supportedOptions.has(option));
-const unknownPositional = extra.find((option) => !option.startsWith("-") && !(wantsSetup && setupProviderAliases.has(option)));
+const unknownPositional = extra.find((option, index) =>
+  !option.startsWith("-") &&
+  !(wantsSetup && setupProviderAliases.has(option)) &&
+  !(wantsRemoveProvider && index === removeProviderIndex + 1)
+);
 
 if (wantsHelp) {
   console.log(
@@ -52,12 +68,20 @@ if (wantsHelp) {
       "  --yes, -y      Use defaults with --setup; useful for scripts and quick local setup.",
       "  --login-device Sign in on another device during setup (Codex device code; Claude return code).",
       "  --login-browser Sign in through the provider's official browser flow during setup.",
+      "  --include-codex-projects  Let Orbitory list/resume recent Codex projects (experimental, broad access).",
+      "  --include-recent-projects Let this Claude provider run in those discovered project folders.",
+      "  --list-providers          List provider ids configured in this folder, then exit.",
+      "  --remove-provider <id>    Remove one provider from this folder after local confirmation.",
       "  --init-config  Create ./orbitory.config.json with a safe starter provider, then exit.",
       "",
       "Examples:",
       "  npx orbitory-host@latest --setup",
       "  npx orbitory-host@latest --setup codex --yes",
       "  npx orbitory-host@latest --setup codex --login-device --yes",
+      "  npx orbitory-host@latest --setup codex --include-codex-projects --yes",
+      "  npx orbitory-host@latest --setup claude --include-recent-projects --yes",
+      "  npx orbitory-host@latest --list-providers",
+      "  npx orbitory-host@latest --remove-provider codex-local",
       "  npx orbitory-host@latest",
       "",
       "Common environment variables:",
@@ -78,6 +102,18 @@ if (unknownOption || unknownPositional) {
   process.exit(1);
 }
 
+if (wantsRemoveProvider && (!removeProviderId || removeProviderId.startsWith("-"))) {
+  console.error("[orbitory-host] --remove-provider requires the exact provider id. Use --list-providers first.");
+  process.exit(1);
+}
+
+const managementModeCount = [wantsSetup, wantsInitConfig, wantsListProviders, wantsRemoveProvider]
+  .filter(Boolean).length;
+if (managementModeCount > 1) {
+  console.error("[orbitory-host] Choose only one of --setup, --init-config, --list-providers, or --remove-provider.");
+  process.exit(1);
+}
+
 if (wantsInitConfig && wantsSetup) {
   console.error("[orbitory-host] Choose either --setup or --init-config, not both.");
   process.exit(1);
@@ -85,6 +121,11 @@ if (wantsInitConfig && wantsSetup) {
 
 if ((wantsLoginDevice || wantsLoginBrowser) && !wantsSetup) {
   console.error("[orbitory-host] --login-device/--login-browser can only be used with --setup.");
+  process.exit(1);
+}
+
+if ((wantsIncludeCodexProjects || wantsIncludeRecentProjects) && !wantsSetup) {
+  console.error("[orbitory-host] Project sharing flags can only be used with --setup.");
   process.exit(1);
 }
 
@@ -99,7 +140,19 @@ if (wantsSetup) {
     assumeYes: wantsYes,
     loginDevice: wantsLoginDevice,
     loginBrowser: wantsLoginBrowser,
+    includeCodexProjects: wantsIncludeCodexProjects,
+    includeRecentProjects: wantsIncludeRecentProjects,
   });
+  process.exit(0);
+}
+
+if (wantsListProviders) {
+  listConfiguredProviders(resolve(process.cwd(), "orbitory.config.json"));
+  process.exit(0);
+}
+
+if (wantsRemoveProvider) {
+  await removeConfiguredProvider(resolve(process.cwd(), "orbitory.config.json"), removeProviderId, wantsYes);
   process.exit(0);
 }
 
@@ -141,7 +194,14 @@ process.env.ORBITORY_DEMO_SESSIONS ??= wantsDemo ? "true" : "false";
 
 await import(pathToFileURL(entrypoint).href);
 
-async function runGuidedSetup({ requestedProvider, assumeYes, loginDevice, loginBrowser }) {
+async function runGuidedSetup({
+  requestedProvider,
+  assumeYes,
+  loginDevice,
+  loginBrowser,
+  includeCodexProjects,
+  includeRecentProjects,
+}) {
   const detected = detectInstalledProviders();
   const rl = shouldAskQuestions(requestedProvider, assumeYes)
     ? createInterface({ input, output })
@@ -152,6 +212,14 @@ async function runGuidedSetup({ requestedProvider, assumeYes, loginDevice, login
     if (!provider) {
       console.error("[orbitory-host] Setup cancelled.");
       return;
+    }
+    if (includeCodexProjects && provider !== "codex") {
+      console.error("[orbitory-host] --include-codex-projects requires --setup codex.");
+      process.exit(1);
+    }
+    if (includeRecentProjects && provider !== "claude") {
+      console.error("[orbitory-host] --include-recent-projects requires --setup claude.");
+      process.exit(1);
     }
 
     const workingDirectory = assumeYes
@@ -224,16 +292,88 @@ async function runGuidedSetup({ requestedProvider, assumeYes, loginDevice, login
 
     const configPath = resolve(workingDirectory, "orbitory.config.json");
     const config = loadConfigForSetup(configPath);
-    const providerConfig = createProviderConfig(provider, workingDirectory, detected[provider]);
+    const existingProviderId = findExistingProviderId(config.agents, provider, workingDirectory);
+    const providerConfig = createProviderConfig(
+      provider,
+      workingDirectory,
+      detected[provider],
+      existingProviderId ?? createProviderId(provider),
+    );
+    const enableCodexHistory = provider === "codex" && (
+      includeCodexProjects ||
+      (!assumeYes && await askForCodexHistory(rl))
+    );
+    const codexHistory =
+      config.projectCatalog && typeof config.projectCatalog === "object" &&
+      config.projectCatalog.codexHistory && typeof config.projectCatalog.codexHistory === "object"
+        ? config.projectCatalog.codexHistory
+        : undefined;
+    const enableRecentProjects = provider === "claude" && Boolean(codexHistory?.enabled) && (
+      includeRecentProjects ||
+      (!assumeYes && await askForRecentProjects(rl))
+    );
+    if (provider === "claude" && includeRecentProjects && !codexHistory?.enabled) {
+      console.error("[orbitory-host] Enable recent Codex projects first with `--setup codex --include-codex-projects`.");
+      console.error("[orbitory-host] No provider configuration was changed.");
+      process.exit(1);
+    }
     const nextConfig = {
       ...config,
       agents: upsertAgent(config.agents, providerConfig),
     };
+    if (provider === "codex") {
+      const nextProjectCatalog = config.projectCatalog && typeof config.projectCatalog === "object"
+        ? { ...config.projectCatalog }
+        : {};
+      if (enableCodexHistory) {
+        nextProjectCatalog.codexHistory = {
+          enabled: true,
+          providerId: providerConfig.id,
+          maxSessions: 100,
+        };
+      } else {
+        delete nextProjectCatalog.codexHistory;
+      }
+      if (Object.keys(nextProjectCatalog).length > 0) {
+        nextConfig.projectCatalog = nextProjectCatalog;
+      } else {
+        delete nextConfig.projectCatalog;
+      }
+    }
+    if (provider === "claude" && codexHistory) {
+      const nextProjectCatalog = config.projectCatalog && typeof config.projectCatalog === "object"
+        ? { ...config.projectCatalog }
+        : {};
+      const nextCodexHistory = { ...codexHistory };
+      const existing = Array.isArray(nextCodexHistory.additionalProviderIds)
+        ? nextCodexHistory.additionalProviderIds.filter((id) => typeof id === "string")
+        : [];
+      const additionalProviderIds = enableRecentProjects
+        ? Array.from(new Set([...existing, providerConfig.id]))
+        : existing.filter((id) => id !== providerConfig.id);
+      if (additionalProviderIds.length > 0) {
+        nextCodexHistory.additionalProviderIds = additionalProviderIds;
+      } else {
+        delete nextCodexHistory.additionalProviderIds;
+      }
+      nextProjectCatalog.codexHistory = nextCodexHistory;
+      nextConfig.projectCatalog = nextProjectCatalog;
+    }
 
-    writeFileSync(configPath, `${JSON.stringify(nextConfig, null, 2)}\n`, { mode: 0o600 });
+    writeConfigAtomically(configPath, nextConfig);
 
     console.log(`[orbitory-host] Updated ${configPath}`);
     console.log(`[orbitory-host] Enabled provider: ${providerConfig.displayName} (${providerConfig.id})`);
+    if (enableCodexHistory) {
+      console.log("[orbitory-host] Codex project history: enabled (experimental, broad project access). Disable projectCatalog.codexHistory to revoke it.");
+    } else if (provider === "codex") {
+      console.log("[orbitory-host] Codex project history: disabled.");
+    }
+    if (enableRecentProjects) {
+      console.log("[orbitory-host] Claude access to recent projects: enabled (broad project access). Rerun setup without --include-recent-projects to revoke it.");
+    } else if (provider === "claude" && codexHistory?.enabled) {
+      console.log("[orbitory-host] Claude access to recent projects: disabled.");
+    }
     console.log("[orbitory-host] If the Orbitory host is already running, tap Refresh in the app; the latest host reloads this setting automatically.");
     console.log("[orbitory-host] If no host is running, start it from this folder with `npx orbitory-host@latest`.");
   } finally {
@@ -287,6 +427,22 @@ async function askForLoginMode(rl, provider) {
   return choice;
 }
 
+async function askForCodexHistory(rl) {
+  if (!rl) return false;
+  console.log("[orbitory-host] Optional: Orbitory can show recent Codex projects and resume their sessions.");
+  console.log("[orbitory-host] This grants the paired phone broad access to start Codex in those project folders.");
+  const answer = (await rl.question("Enable recent Codex projects? [y/N]: ")).trim().toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
+async function askForRecentProjects(rl) {
+  if (!rl) return false;
+  console.log("[orbitory-host] Optional: make this Claude provider available in the recent project folders already discovered by Orbitory.");
+  console.log("[orbitory-host] This grants Claude broad access to start in those folders; Claude session history itself is not read.");
+  const answer = (await rl.question("Enable Claude in recent projects? [y/N]: ")).trim().toLowerCase();
+  return answer === "y" || answer === "yes";
+}
+
 function chooseDefaultProvider(detected) {
   if (detected.codex) {
     return "codex";
@@ -320,8 +476,58 @@ function providerLoginReady(provider, command) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 15_000,
+    env: providerRuntimeEnv(provider),
   });
-  return result.status === 0;
+  if (result.status !== 0) return false;
+  return provider !== "claude" || claudeApiAuthenticationReady(command);
+}
+
+function claudeApiAuthenticationReady(command) {
+  const probeDirectory = mkdtempSync(join(tmpdir(), "orbitory-claude-auth-"));
+  try {
+    const result = spawnSync(
+      command,
+      [
+        "-p",
+        "Reply with only OK.",
+        "--output-format",
+        "json",
+        "--tools",
+        "",
+        "--permission-mode",
+        "plan",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--disable-slash-commands",
+      ],
+      {
+        cwd: probeDirectory,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 45_000,
+        env: providerRuntimeEnv("claude"),
+      },
+    );
+    return result.status === 0;
+  } finally {
+    rmSync(probeDirectory, { recursive: true, force: true });
+  }
+}
+
+function providerRuntimeEnvAllowlist(provider) {
+  return provider === "codex"
+    ? ["PATH", "HOME", "OPENAI_API_KEY"]
+    : ["PATH", "HOME", "USER", "LOGNAME"];
+}
+
+function providerRuntimeEnv(provider) {
+  const env = {};
+  for (const key of providerRuntimeEnvAllowlist(provider)) {
+    if (process.env[key] !== undefined && key !== "ORBITORY_PAIRING_TOKEN") {
+      env[key] = process.env[key];
+    }
+  }
+  return env;
 }
 
 function providerDisplayName(provider) {
@@ -357,23 +563,23 @@ function upsertAgent(agents, nextAgent) {
   return [...filtered, nextAgent];
 }
 
-function createProviderConfig(provider, workingDirectory, commandPath) {
+function createProviderConfig(provider, workingDirectory, commandPath, id) {
   switch (provider) {
     case "codex":
-      return createCodexProviderConfig(workingDirectory, commandPath);
+      return createCodexProviderConfig(workingDirectory, commandPath, id);
     case "claude":
-      return createClaudeProviderConfig(workingDirectory, commandPath);
+      return createClaudeProviderConfig(workingDirectory, commandPath, id);
     case "demo":
-      return createDemoProviderConfig(workingDirectory);
+      return createDemoProviderConfig(workingDirectory, id);
     default:
       throw new Error(`Unknown setup provider: ${provider}`);
   }
 }
 
-function createDemoProviderConfig(workingDirectory) {
+function createDemoProviderConfig(workingDirectory, id = "demo-terminal") {
   return {
-    id: "demo-terminal",
-    displayName: "Demo Terminal Agent",
+    id,
+    displayName: `Demo · ${projectLabel(workingDirectory)}`,
     agentType: "custom",
     command: process.execPath,
     args: [resolve(root, "scripts/demo-agent.js")],
@@ -386,10 +592,10 @@ function createDemoProviderConfig(workingDirectory) {
   };
 }
 
-function createClaudeProviderConfig(workingDirectory, commandPath = "claude") {
+function createClaudeProviderConfig(workingDirectory, commandPath = "claude", id = "claude-code-local") {
   return {
-    id: "claude-code-local",
-    displayName: "Claude Code (this project)",
+    id,
+    displayName: `Claude Code · ${projectLabel(workingDirectory)}`,
     agentType: "claudeCode",
     command: commandPath,
     args: [],
@@ -398,24 +604,148 @@ function createClaudeProviderConfig(workingDirectory, commandPath = "claude") {
     io: "stream-json",
     maxRuntimeSeconds: 14_400,
     approvalTimeoutSeconds: 900,
-    envAllowlist: ["PATH", "HOME"],
+    envAllowlist: providerRuntimeEnvAllowlist("claude"),
     sandbox: realAgentSandbox(),
   };
 }
 
-function createCodexProviderConfig(workingDirectory, commandPath = "codex") {
+function createCodexProviderConfig(workingDirectory, commandPath = "codex", id = "codex-local") {
   return {
-    id: "codex-local",
-    displayName: "Codex (this project)",
+    id,
+    displayName: `Codex · ${projectLabel(workingDirectory)}`,
     agentType: "codex",
     command: commandPath,
-    args: ["exec"],
+    args: [],
     workingDirectory,
     enabled: true,
+    io: "codex-jsonl",
     maxRuntimeSeconds: 14_400,
-    envAllowlist: ["PATH", "HOME", "OPENAI_API_KEY"],
+    envAllowlist: providerRuntimeEnvAllowlist("codex"),
     sandbox: realAgentSandbox(),
   };
+}
+
+function createProviderId(provider) {
+  const prefix = provider === "claude" ? "claude" : provider;
+  return `${prefix}-${randomUUID().replaceAll("-", "").slice(0, 10)}`;
+}
+
+function providerAgentType(provider) {
+  return provider === "codex" ? "codex" : provider === "claude" ? "claudeCode" : "custom";
+}
+
+function findExistingProviderId(agents, provider, workingDirectory) {
+  const expectedType = providerAgentType(provider);
+  for (const agent of agents) {
+    if (!agent || typeof agent !== "object" || agent.agentType !== expectedType || typeof agent.id !== "string") {
+      continue;
+    }
+    const configuredDirectory = typeof agent.workingDirectory === "string"
+      ? resolve(workingDirectory, agent.workingDirectory)
+      : workingDirectory;
+    try {
+      if (realpathSync(configuredDirectory) === realpathSync(workingDirectory)) return agent.id;
+    } catch {
+      // A missing/stale configured directory is not the project being set up.
+    }
+  }
+  return undefined;
+}
+
+function projectLabel(workingDirectory) {
+  const parts = resolve(workingDirectory).split(/[\\/]/u).filter(Boolean);
+  return parts.at(-1) ?? "Project";
+}
+
+function writeConfigAtomically(configPath, config) {
+  const temporaryPath = `${configPath}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    renameSync(temporaryPath, configPath);
+  } catch (error) {
+    try {
+      if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+    } catch {
+      // Preserve the original write error.
+    }
+    throw error;
+  }
+}
+
+function listConfiguredProviders(configPath) {
+  const config = loadConfigForSetup(configPath);
+  if (config.agents.length === 0) {
+    console.log("[orbitory-host] No providers are configured in this folder.");
+    return;
+  }
+  console.log("[orbitory-host] Configured providers:");
+  for (const agent of config.agents) {
+    if (!agent || typeof agent !== "object" || typeof agent.id !== "string") continue;
+    const status = agent.enabled === true ? "enabled" : "disabled";
+    const name = typeof agent.displayName === "string" ? agent.displayName : agent.id;
+    console.log(`- ${agent.id} (${status}) ${name}`);
+  }
+}
+
+async function removeConfiguredProvider(configPath, providerId, assumeYes) {
+  if (!existsSync(configPath)) {
+    console.error(`[orbitory-host] ${configPath} does not exist.`);
+    process.exit(1);
+  }
+  const config = loadConfigForSetup(configPath);
+  const target = config.agents.find((agent) => agent && typeof agent === "object" && agent.id === providerId);
+  if (!target) {
+    console.error(`[orbitory-host] Provider ${JSON.stringify(providerId)} was not found. Use --list-providers.`);
+    process.exit(1);
+  }
+
+  let confirmed = assumeYes;
+  if (!confirmed && input.isTTY) {
+    const rl = createInterface({ input, output });
+    try {
+      const name = typeof target.displayName === "string" ? target.displayName : providerId;
+      const answer = (await rl.question(`Remove provider "${name}" (${providerId})? [y/N]: `)).trim().toLowerCase();
+      confirmed = answer === "y" || answer === "yes";
+    } finally {
+      rl.close();
+    }
+  }
+  if (!confirmed) {
+    console.error("[orbitory-host] Removal cancelled. Pass --yes for non-interactive confirmation.");
+    process.exit(1);
+  }
+
+  const nextAgents = config.agents.filter((agent) => !agent || typeof agent !== "object" || agent.id !== providerId);
+  const projectCatalog = config.projectCatalog && typeof config.projectCatalog === "object"
+    ? { ...config.projectCatalog }
+    : undefined;
+  if (
+    projectCatalog?.codexHistory &&
+    typeof projectCatalog.codexHistory === "object" &&
+    projectCatalog.codexHistory.providerId === providerId
+  ) {
+    delete projectCatalog.codexHistory;
+  } else if (
+    projectCatalog?.codexHistory &&
+    typeof projectCatalog.codexHistory === "object" &&
+    Array.isArray(projectCatalog.codexHistory.additionalProviderIds)
+  ) {
+    const remaining = projectCatalog.codexHistory.additionalProviderIds.filter(
+      (id) => id !== providerId,
+    );
+    if (remaining.length > 0) {
+      projectCatalog.codexHistory.additionalProviderIds = remaining;
+    } else {
+      delete projectCatalog.codexHistory.additionalProviderIds;
+    }
+  }
+  writeConfigAtomically(configPath, {
+    ...config,
+    agents: nextAgents,
+    ...(projectCatalog ? { projectCatalog } : {}),
+  });
+  console.log(`[orbitory-host] Removed provider ${providerId}.`);
+  console.log("[orbitory-host] If the host is running, tap Refresh in Orbitory.");
 }
 
 function realAgentSandbox() {
