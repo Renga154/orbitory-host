@@ -152,6 +152,16 @@
       "enabled": true
     },
     {
+      "id": "claude-stream-fail-linger",
+      "displayName": "Claude Code Stream Fail Linger (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--fail", "--linger-after-fail-ms=3000", "--delay-ms=30"],
+      "workingDirectory": ".",
+      "enabled": true
+    },
+    {
       "id": "claude-stream-crash",
       "displayName": "Claude Code Stream Crash (fake, test)",
       "agentType": "claudeCode",

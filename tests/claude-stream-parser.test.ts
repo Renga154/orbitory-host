@@ -718,10 +718,11 @@ describe("mapEventToEmissions: result", () => {
     }
   });
 
-  test("the two spike-captured auth strings produce the dedicated login copy", () => {
+  test("captured auth failures produce the dedicated login copy", () => {
     for (const text of [
       "Not logged in · Please run /login",
       "Failed to authenticate. API Error: 401 …",
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
     ]) {
       assert.equal(isAuthFailureText(text), true, `should detect: ${text}`);
       const emissions = mapLine(
@@ -731,8 +732,9 @@ describe("mapEventToEmissions: result", () => {
       assert.equal(failed.type, "sessionFailed");
       if (failed.type === "sessionFailed") {
         assert.deepEqual(failed.reason, AUTH_FAILURE_REASON);
-        assert.match(failed.reason.en, /run `claude` once/);
+        assert.match(failed.reason.en, /`claude auth login`/);
         assert.match(failed.reason.ja, /ログイン/);
+        assert.match(failed.reason.ja, /`claude auth login`/);
       }
     }
     assert.equal(isAuthFailureText("everything is fine"), false);

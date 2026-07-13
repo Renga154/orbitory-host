@@ -43,7 +43,7 @@ npx orbitory-host@latest --setup
 ```
 
 Choose Codex or Claude Code. Setup writes or updates `orbitory.config.json` in that folder with the selected provider enabled.
-Setup first confirms that the selected CLI is installed and authenticated. It stores the detected executable's absolute path in the host-only config, so later host launches do not depend on nvm or background-process PATH differences. If the CLI is missing, setup exits without creating an unusable enabled provider and links to the official installer.
+Setup first confirms that the selected CLI is installed and authenticated. It stores the detected executable's absolute path in the host-only config, so later host launches do not depend on nvm or background-process PATH differences. When updating an existing provider, setup verifies and preserves that configured executable instead of replacing it with a different duplicate found earlier on PATH. If the CLI is missing, setup exits without creating an unusable enabled provider and links to the official installer.
 
 For Claude Code, setup also performs one minimal no-tools response in an empty temporary directory, with session persistence disabled. This catches stale credentials where `claude auth status` says logged in but the API returns 401. It sends no project content, but it can consume a very small amount of your Claude allowance.
 
@@ -119,5 +119,6 @@ Press `Ctrl-C` in the terminal. The host-agent will close the server and withdra
 - Provider says Unavailable: rerun `npx orbitory-host@latest --setup` in the project folder, then tap Refresh. The latest host reloads config changes automatically.
 - Provider CLI not found: install it from the official URL printed by setup, then rerun the same command. Orbitory does not install or impersonate an AI provider.
 - Claude says logged in but a session reports authentication failure: the local credential is stale. Run `claude auth login`, approve the official Claude page, then rerun `npx orbitory-host@latest --setup claude --yes`.
+- Multiple `claude` installations exist: rerun setup in the same project folder. Orbitory preserves the absolute executable already pinned in that folder's provider config; remove or reorder stale duplicates separately if desired.
 - `EADDRINUSE ... 0.0.0.0:4000`: this is not an AI login failure. Another process already owns port 4000. If it is an Orbitory host, do not start a second copy; tap Refresh. If it is an older host, stop its terminal with `Ctrl-C`, then rerun `npx orbitory-host@latest`.
 - nvm warns about `.npmrc` `prefix/globalconfig`: this is a Node.js environment warning, separate from Orbitory's provider config. If the command continues, setup can still succeed. If needed, run the `nvm use --delete-prefix <version> --silent` command shown in the warning.

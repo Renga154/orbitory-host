@@ -15,6 +15,10 @@
  *   --fail                 emit the spike-captured logged-out result error
  *                          (`is_error: true`, "Not logged in · Please run
  *                          /login") and exit 1
+ *   --linger-after-fail-ms=N
+ *                          after the logged-out result, remain alive for N ms
+ *                          unless SIGTERM arrives. On SIGTERM, print a marker
+ *                          before exiting so lifecycle cleanup is testable.
  *   --exit-code=N          crash mid-stream: exit N right after the tool
  *                          events, with NO result event (N != 0)
  *   --print-secrets        plant the SAME fabricated secrets as
@@ -53,6 +57,7 @@ function flagValue(name, fallback) {
 
 const delayMs = flagValue("--delay-ms", 40);
 const lingerMs = flagValue("--linger-ms", 400);
+const lingerAfterFailMs = flagValue("--linger-after-fail-ms", 0);
 const crashExitCode = flagValue("--exit-code", 0);
 const fail = process.argv.includes("--fail");
 const printSecrets = process.argv.includes("--print-secrets");
@@ -212,6 +217,13 @@ async function main() {
       total_cost_usd: 0,
       usage: { input_tokens: 0, output_tokens: 0 },
     });
+    if (lingerAfterFailMs > 0) {
+      process.once("SIGTERM", () => {
+        process.stdout.write("fake auth-failure child received SIGTERM\n");
+        process.exit(0);
+      });
+      await sleep(lingerAfterFailMs);
+    }
     process.exit(1);
   }
 

@@ -120,6 +120,41 @@ export function serializeUserMessage(text: string): string {
   })}\n`;
 }
 
+/**
+ * Claude Code uses the OS temp directory for per-project/session state before
+ * executing an approved tool. Pointing it at a fresh directory under its own
+ * already-allowed state root keeps sandbox-exec write confinement intact; we
+ * never need to open all of `/tmp` or `/private/tmp`.
+ */
+export function prepareClaudeRuntimeTempDirectory(
+  homeDirectory = os.homedir(),
+): string {
+  if (!path.isAbsolute(homeDirectory)) {
+    throw new Error("Claude Code HOME must be an absolute path.");
+  }
+  const stateRoot = path.join(homeDirectory, ".claude");
+  fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  const resolvedStateRoot = fs.realpathSync(stateRoot);
+  if (!fs.statSync(resolvedStateRoot).isDirectory()) {
+    throw new Error("Claude Code state path is not a directory.");
+  }
+  const directory = fs.mkdtempSync(path.join(resolvedStateRoot, "orbitory-tmp-"));
+  fs.chmodSync(directory, 0o700);
+  return directory;
+}
+
+/** Apply Claude's documented temp override without mutating the base env. */
+export function buildClaudeRuntimeEnvironment(
+  baseEnv: NodeJS.ProcessEnv,
+  tempDirectory: string,
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    TMPDIR: tempDirectory,
+    CLAUDE_CODE_TMPDIR: tempDirectory,
+  };
+}
+
 export class ClaudeCodeStreamProvider implements AgentProvider {
   readonly id = "claude-code-stream";
   readonly displayName: string;
@@ -141,6 +176,8 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
   private outputLimitReached = false;
   /** Directory holding the generated per-session MCP config; removed on exit/stop. */
   private mcpDir: string | null = null;
+  /** Private Claude runtime temp directory under ~/.claude; removed on exit/stop. */
+  private claudeTempDir: string | null = null;
   private unregisterBridge: (() => void) | null = null;
   /** Status/summary to restore once a pending approval resolves. */
   private statusBeforeApproval: { status: AgentStatus; summary: Localized } | null = null;
@@ -347,11 +384,27 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
     // Child env: the shared allowlist policy (pairing token ALWAYS stripped)
     // plus the two bridge vars this session's MCP tool needs. Values are
     // never logged.
-    const childEnv: NodeJS.ProcessEnv = {
+    const baseChildEnv: NodeJS.ProcessEnv = {
       ...buildTerminalChildEnv(this.config.envAllowlist),
       ORBITORY_APPROVAL_BRIDGE_URL: this.bridgeUrl(),
       ORBITORY_APPROVAL_BRIDGE_TOKEN: this.bridgeToken,
     };
+    let childEnv: NodeJS.ProcessEnv;
+    try {
+      const childHome = baseChildEnv["HOME"];
+      this.claudeTempDir = prepareClaudeRuntimeTempDirectory(
+        typeof childHome === "string" && path.isAbsolute(childHome) ? childHome : os.homedir(),
+      );
+      childEnv = buildClaudeRuntimeEnvironment(baseChildEnv, this.claudeTempDir);
+    } catch (err) {
+      const message = this.scrub((err as Error).message);
+      this.cleanupRuntimeArtifacts();
+      this.failSessionAfterSubscription({
+        en: `Failed to prepare private runtime state for ${this.config.displayName}: ${message}`,
+        ja: `${this.config.displayName} の非公開ランタイム領域を準備できませんでした: ${message}`,
+      });
+      return;
+    }
 
     let child: ChildProcess;
     try {
@@ -364,7 +417,7 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
       });
     } catch (err) {
       const message = this.scrub((err as Error).message);
-      this.cleanupBridge();
+      this.cleanupRuntimeArtifacts();
       this.failSessionAfterSubscription({
         en: `Failed to start ${this.config.displayName}: ${message}`,
         ja: `${this.config.displayName} の起動に失敗しました: ${message}`,
@@ -392,7 +445,7 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
       this.childExited = true;
       unregisterActiveChild(child, child.pid);
       this.clearRuntimeTimer();
-      this.cleanupBridge();
+      this.cleanupRuntimeArtifacts();
       if (this.isTerminal(this.session.status)) return;
       const message = this.scrub(err.message);
       this.failSession({
@@ -411,7 +464,7 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
       }
       this.flushRemainingBuffers();
       this.broker.disposeAll();
-      this.cleanupBridge();
+      this.cleanupRuntimeArtifacts();
 
       if (this.stopped) {
         this.finalizeAsStoppedByUser();
@@ -492,6 +545,19 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
         // Best-effort; it's a 0700 tmp dir either way.
       }
       this.mcpDir = null;
+    }
+  }
+
+  /** Remove every host-side per-session artifact after the child is gone. */
+  private cleanupRuntimeArtifacts(): void {
+    this.cleanupBridge();
+    if (this.claudeTempDir !== null) {
+      try {
+        fs.rmSync(this.claudeTempDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort; it is a private directory inside Claude's own state.
+      }
+      this.claudeTempDir = null;
     }
   }
 
@@ -648,6 +714,13 @@ export class ClaudeCodeStreamProvider implements AgentProvider {
         this.broker.disposeAll();
         this.unregisterApprovalBridge();
         this.failSession(emission.reason);
+        // Claude's stream-json process can remain alive after emitting a
+        // terminal result error (notably an expired OAuth session). Once the
+        // session is failed there is no valid conversation to keep open, so
+        // terminate it and let the normal exit handler finish cleanup.
+        if (this.child && !this.childExited) {
+          this.terminateWithEscalation();
+        }
         return;
     }
   }

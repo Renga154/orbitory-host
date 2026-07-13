@@ -18,11 +18,16 @@ import assert from "node:assert/strict";
 import { startTestServer, type TestServer } from "./helpers/testServer.js";
 import { connect, type TestWsClient } from "./helpers/wsClient.js";
 import { loadAgentConfigs } from "../src/agentConfig.js";
-import { serializeUserMessage } from "../src/providers/ClaudeCodeStreamProvider.js";
+import {
+  buildClaudeRuntimeEnvironment,
+  prepareClaudeRuntimeTempDirectory,
+  serializeUserMessage,
+} from "../src/providers/ClaudeCodeStreamProvider.js";
 import { CLAUDE_CODE_STREAM_EXAMPLE_CONFIG } from "../src/providers/agentPresets.js";
 import type { AgentSession, ChangedFile, Envelope, HostInfo, TestResult } from "../src/types.js";
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -50,6 +55,32 @@ describe("serializeUserMessage", () => {
     };
     assert.equal(parsed.type, "user");
     assert.equal(parsed.message.content[0]!.text, 'say "hi"; rm -rf / `whoami`');
+  });
+});
+
+describe("prepareClaudeRuntimeTempDirectory", () => {
+  test("creates a private, per-session temp directory inside Claude state", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-claude-home-test-"));
+    try {
+      const first = prepareClaudeRuntimeTempDirectory(home);
+      const second = prepareClaudeRuntimeTempDirectory(home);
+      const stateRoot = fs.realpathSync(path.join(home, ".claude"));
+
+      assert.notEqual(first, second);
+      for (const directory of [first, second]) {
+        assert.equal(path.dirname(directory), stateRoot);
+        assert.match(path.basename(directory), /^orbitory-tmp-/u);
+        assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
+      }
+
+      const baseEnv = { HOME: home, PATH: "/usr/bin" };
+      const runtimeEnv = buildClaudeRuntimeEnvironment(baseEnv, first);
+      assert.deepEqual(baseEnv, { HOME: home, PATH: "/usr/bin" });
+      assert.equal(runtimeEnv["TMPDIR"], first);
+      assert.equal(runtimeEnv["CLAUDE_CODE_TMPDIR"], first);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
@@ -285,7 +316,7 @@ describe("chat round-trip over stdin", () => {
 });
 
 describe("failure paths", () => {
-  test("--fail (logged-out result) → session.failed with the bilingual login copy", async () => {
+  test("--fail (auth result) → session.failed with the bilingual login copy", async () => {
     start("claude-stream-fail");
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
@@ -294,9 +325,29 @@ describe("failure paths", () => {
       8000,
     );
     const reason = (failed.payload as { reason: { en: string; ja: string } }).reason;
-    assert.match(reason.en, /not logged in/i);
-    assert.match(reason.en, /run `claude` once/);
+    assert.match(reason.en, /expired or is unavailable/i);
+    assert.match(reason.en, /`claude auth login`/);
     assert.match(reason.ja, /ログイン/);
+    assert.match(reason.ja, /`claude auth login`/);
+  });
+
+  test("an auth-failed stream child is terminated instead of lingering", async () => {
+    start("claude-stream-fail-linger");
+    const created = await client.waitFor((e) => e.type === "session.created", 3000);
+    const sessionId = created.sessionId!;
+    await client.waitFor(
+      (e) => e.type === "session.failed" && e.sessionId === sessionId,
+      8000,
+    );
+
+    const terminated = await client.waitFor(
+      (e) =>
+        e.type === "terminal.output" &&
+        e.sessionId === sessionId &&
+        (e.payload as { text: string }).text === "fake auth-failure child received SIGTERM",
+      1500,
+    );
+    assert.equal((terminated.payload as { stream: string }).stream, "stdout");
   });
 
   test("a mid-stream crash (--exit-code=3, no result event) → session.failed with the exit code", async () => {

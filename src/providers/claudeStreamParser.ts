@@ -346,16 +346,16 @@ export const WAITING_FOR_MESSAGE_SUMMARY: Localized = {
 };
 
 /**
- * Dedicated bilingual failure copy for the two auth failure strings captured
- * in the spike (§6 S1): the fix is a one-time `claude` login on the host.
+ * Dedicated bilingual failure copy for auth failures captured from the real
+ * CLI: the fix is an explicit official CLI login on the host.
  */
 export const AUTH_FAILURE_REASON: Localized = {
   en:
-    "Claude Code is not logged in on this host. Open a terminal on the host machine, " +
-    "run `claude` once and log in, then start a new session.",
+    "Claude Code login has expired or is unavailable on this host. Open a terminal on the host machine, " +
+    "run `claude auth login`, complete the official sign-in, then start a new session.",
   ja:
-    "このホストでは Claude Code にログインしていません。ホストマシンのターミナルで一度 `claude` を実行して" +
-    "ログインしてから、新しいセッションを開始してください。",
+    "このホストの Claude Code ログインが期限切れ、または利用できません。ホストマシンのターミナルで " +
+    "`claude auth login` を実行して公式ログインを完了し、新しいセッションを開始してください。",
 };
 
 /** The exact auth-failure substrings captured from the real CLI (spike §6 S1). */

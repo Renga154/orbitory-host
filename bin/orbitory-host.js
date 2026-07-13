@@ -230,7 +230,17 @@ async function runGuidedSetup({
       process.exit(1);
     }
 
-    if (provider !== "demo" && !detected[provider]) {
+    const configPath = resolve(workingDirectory, "orbitory.config.json");
+    const config = loadConfigForSetup(configPath);
+    const existingProvider = findExistingProvider(config.agents, provider, workingDirectory);
+    // A host-authoritative existing config pins the CLI that real sessions
+    // already use. Prefer it over PATH so duplicate/older installations do
+    // not produce a false login failure or silently replace the working CLI.
+    const providerCommand = provider === "demo"
+      ? undefined
+      : existingProvider?.command ?? detected[provider];
+
+    if (provider !== "demo" && !providerCommand) {
       const displayName = providerDisplayName(provider);
       const installUrl = provider === "codex"
         ? "https://developers.openai.com/codex/cli"
@@ -240,8 +250,7 @@ async function runGuidedSetup({
       process.exit(1);
     }
 
-    if (provider !== "demo" && detected[provider]) {
-      const providerCommand = detected[provider];
+    if (provider !== "demo" && providerCommand) {
       let loginReady = providerLoginReady(provider, providerCommand);
       const requestedLoginMode = loginReady
         ? undefined
@@ -290,14 +299,11 @@ async function runGuidedSetup({
       }
     }
 
-    const configPath = resolve(workingDirectory, "orbitory.config.json");
-    const config = loadConfigForSetup(configPath);
-    const existingProviderId = findExistingProviderId(config.agents, provider, workingDirectory);
     const providerConfig = createProviderConfig(
       provider,
       workingDirectory,
-      detected[provider],
-      existingProviderId ?? createProviderId(provider),
+      providerCommand,
+      existingProvider?.id ?? createProviderId(provider),
     );
     const enableCodexHistory = provider === "codex" && (
       includeCodexProjects ||
@@ -634,17 +640,24 @@ function providerAgentType(provider) {
   return provider === "codex" ? "codex" : provider === "claude" ? "claudeCode" : "custom";
 }
 
-function findExistingProviderId(agents, provider, workingDirectory) {
+function findExistingProvider(agents, provider, workingDirectory) {
   const expectedType = providerAgentType(provider);
   for (const agent of agents) {
-    if (!agent || typeof agent !== "object" || agent.agentType !== expectedType || typeof agent.id !== "string") {
+    if (
+      !agent ||
+      typeof agent !== "object" ||
+      agent.agentType !== expectedType ||
+      typeof agent.id !== "string" ||
+      typeof agent.command !== "string" ||
+      agent.command.trim().length === 0
+    ) {
       continue;
     }
     const configuredDirectory = typeof agent.workingDirectory === "string"
       ? resolve(workingDirectory, agent.workingDirectory)
       : workingDirectory;
     try {
-      if (realpathSync(configuredDirectory) === realpathSync(workingDirectory)) return agent.id;
+      if (realpathSync(configuredDirectory) === realpathSync(workingDirectory)) return agent;
     } catch {
       // A missing/stale configured directory is not the project being set up.
     }

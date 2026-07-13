@@ -212,6 +212,55 @@ describe("public npm package metadata", () => {
     assert.deepEqual(config.agents[0]?.envAllowlist, ["PATH", "HOME", "USER", "LOGNAME"]);
   });
 
+  test("--setup claude prefers the configured CLI when PATH contains a stale duplicate", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const configuredBin = makeLoggedInClaudeBin();
+    const configuredClaude = path.join(configuredBin, "claude");
+    const staleBin = path.join(makeTempDir(), "bin");
+    fs.mkdirSync(staleBin);
+    fs.writeFileSync(
+      path.join(staleBin, "claude"),
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"auth\" ] && [ \"$2\" = \"status\" ]; then exit 0; fi",
+        "exit 1",
+        "",
+      ].join("\n"),
+      { mode: 0o700 },
+    );
+    fs.writeFileSync(
+      path.join(cwd, "orbitory.config.json"),
+      `${JSON.stringify({
+        agents: [
+          {
+            id: "claude-existing",
+            displayName: "Claude Code existing",
+            agentType: "claudeCode",
+            command: configuredClaude,
+            args: [],
+            workingDirectory: cwd,
+            enabled: true,
+            io: "stream-json",
+          },
+        ],
+      }, null, 2)}\n`,
+    );
+
+    const result = spawnSync(process.execPath, [binPath, "--setup", "claude", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${staleBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(fs.readFileSync(path.join(cwd, "orbitory.config.json"), "utf8")) as {
+      agents: Array<{ id: string; command: string }>;
+    };
+    assert.equal(config.agents[0]?.id, "claude-existing");
+    assert.equal(config.agents[0]?.command, configuredClaude);
+  });
+
   test("--setup claude rejects authentication that depends on an environment value runtime strips", () => {
     const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
     const cwd = makeTempDir();
