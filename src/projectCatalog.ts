@@ -30,7 +30,8 @@ import type {
 } from "./types.js";
 
 const CATALOG_CACHE_MS = 15_000;
-const APP_SERVER_TIMEOUT_MS = 8_000;
+const APP_SERVER_INITIALIZE_TIMEOUT_MS = 8_000;
+const APP_SERVER_THREAD_LIST_TIMEOUT_MS = 20_000;
 const MAX_APP_SERVER_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_DISPLAY_NAME_CHARS = 80;
 const MAX_RESUME_TITLE_CHARS = 120;
@@ -316,7 +317,7 @@ export function queryCodexThreads(
       cleanupFallback.unref();
       resolve(threads);
     };
-    const timer = setTimeout(() => finish([]), APP_SERVER_TIMEOUT_MS);
+    let timer = setTimeout(() => finish([]), APP_SERVER_INITIALIZE_TIMEOUT_MS);
 
     child.on("error", () => finish([]));
     // `close` fires after stdio is drained; `exit` can race the final response.
@@ -348,6 +349,8 @@ export function queryCodexThreads(
         const record = message as Record<string, unknown>;
 
         if (record["id"] === 1 && record["result"] !== undefined) {
+          clearTimeout(timer);
+          timer = setTimeout(() => finish([]), APP_SERVER_THREAD_LIST_TIMEOUT_MS);
           child.stdin?.write(
             `${JSON.stringify({
               jsonrpc: "2.0",

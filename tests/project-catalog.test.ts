@@ -19,7 +19,12 @@ afterEach(() => {
 
 function prepareFakeCodexHome(
   root: string,
-  scenario: { cwd: string; secondCwd?: string; exitAfterList?: boolean },
+  scenario: {
+    cwd: string;
+    secondCwd?: string;
+    exitAfterList?: boolean;
+    listDelayMs?: number;
+  },
 ): string {
   const codexHome = path.join(root, "codex-home");
   const sessions = path.join(codexHome, "sessions");
@@ -196,6 +201,67 @@ test("an explicitly allowlisted Claude provider can start in discovered project 
   assert.equal(claudeLaunch?.config.agentType, "claudeCode");
   assert.equal(claudeLaunch?.config.workingDirectory, fs.realpathSync(discoveredProject));
   assert.equal(claudeLaunch?.codexThreadId, undefined);
+});
+
+test("history indexing just beyond the old 8-second cutoff still exposes Claude projects", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "orbitory-project-slow-history-"));
+  const configuredProject = path.join(root, "configured-project");
+  const discoveredProject = path.join(root, "slow-discovered-project");
+  fs.mkdirSync(configuredProject);
+  fs.mkdirSync(discoveredProject);
+  prepareFakeCodexHome(root, {
+    cwd: configuredProject,
+    secondCwd: discoveredProject,
+    listDelayMs: 8_250,
+  });
+  const configPath = path.join(root, "orbitory.config.json");
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify({
+      agents: [
+        {
+          id: "codex-template",
+          displayName: "Codex",
+          agentType: "codex",
+          command: fakeCodex,
+          args: [],
+          workingDirectory: configuredProject,
+          enabled: true,
+          io: "codex-jsonl",
+          sandbox: { mode: "none", required: false },
+        },
+        {
+          id: "claude-template",
+          displayName: "Claude Code",
+          agentType: "claudeCode",
+          command: process.execPath,
+          args: [],
+          workingDirectory: configuredProject,
+          enabled: true,
+          io: "stream-json",
+          sandbox: { mode: "none", required: false },
+        },
+      ],
+      projectCatalog: {
+        codexHistory: {
+          enabled: true,
+          providerId: "codex-template",
+          additionalProviderIds: ["claude-template"],
+          maxSessions: 10,
+        },
+      },
+    }),
+  );
+  process.env["ORBITORY_AGENT_CONFIG_PATH"] = configPath;
+
+  const { ProjectCatalog } = await import("../src/projectCatalog.js");
+  const snapshot = await new ProjectCatalog().snapshot(true);
+  const discovered = snapshot.projects.find(
+    (project) => project.displayName === "slow-discovered-project",
+  );
+
+  assert.ok(discovered, "slow but valid Codex history must not disappear at eight seconds");
+  assert.deepEqual(discovered.providerIds.sort(), ["claude-template", "codex-template"]);
 });
 
 test("Codex history discovery fails closed for a workspace-only container", async () => {

@@ -91,12 +91,21 @@ rl.on("line", (line) => {
         parentThreadId: "thread-secret-001",
       },
     ] : [];
-    process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, result: {
+    const response = `${JSON.stringify({ jsonrpc: "2.0", id: 2, result: {
       data,
       nextCursor: null,
       backwardsCursor: null,
-    } })}\n`, () => {
-      if (scenario.exitAfterList === true) process.exit(0);
-    });
+    } })}\n`;
+    const writeResponse = () => {
+      process.stdout.write(response, () => {
+        if (scenario.exitAfterList === true) process.exit(0);
+      });
+    };
+    const listDelayMs = Number(scenario.listDelayMs);
+    if (Number.isFinite(listDelayMs) && listDelayMs > 0) {
+      setTimeout(writeResponse, listDelayMs);
+    } else {
+      writeResponse();
+    }
   }
 });
