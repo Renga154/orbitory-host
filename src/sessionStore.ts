@@ -21,12 +21,13 @@
  * (see `config.ts`) — a fresh live connection shows the truth by default.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as os from "node:os";
 
 import {
   agentConfigs,
+  loadProviderCatalog,
   loadProviderDescriptors,
   refreshAgentConfigs,
   type TerminalAgentConfig,
@@ -57,9 +58,73 @@ import type {
   HostInfo,
   Localized,
   ProviderDescriptor,
+  ProvidersSnapshotPayload,
   ServerMessage,
   TestResult,
 } from "./types.js";
+
+export interface StartSessionOptions {
+  hostId: string;
+  agentType: string;
+  title: string;
+  providerId?: string;
+  initialPrompt?: string;
+  projectId?: string;
+  resumeId?: string;
+  requestId?: string;
+  launchProfileId?: string;
+  modelId?: string;
+  permissionProfileId?: string;
+  toolsetId?: string;
+  /** Required for strict session.launch; omitted only by legacy session.start. */
+  catalogRevision?: string;
+  strictControls?: boolean;
+}
+
+export interface SessionStartCreatedResult {
+  kind: "created" | "replayed";
+  session: AgentSession;
+}
+
+export interface SessionStartRejectedResult {
+  kind: "rejected";
+  sessionId: string | null;
+  code: string;
+  message: string;
+  requestId?: string;
+  recoverable: boolean;
+  freshAttempt: boolean;
+  providerStartRejectedReason?: string;
+}
+
+export type SessionStartResult = SessionStartCreatedResult | SessionStartRejectedResult;
+
+interface LaunchRequestRecord {
+  sessionId: string;
+  fingerprint: string;
+}
+
+function launchFingerprint(options: StartSessionOptions): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        hostId: options.hostId,
+        agentType: options.agentType,
+        title: options.title,
+        providerId: options.providerId ?? null,
+        initialPrompt: options.initialPrompt ?? null,
+        projectId: options.projectId ?? null,
+        resumeId: options.resumeId ?? null,
+        launchProfileId: options.launchProfileId ?? null,
+        modelId: options.modelId ?? null,
+        permissionProfileId: options.permissionProfileId ?? null,
+        toolsetId: options.toolsetId ?? null,
+        catalogRevision: options.catalogRevision ?? null,
+        strictControls: options.strictControls ?? false,
+      }),
+    )
+    .digest("hex");
+}
 
 // ---------------------------------------------------------------------------
 // Small local helpers
@@ -499,6 +564,8 @@ export class SessionStore extends EventEmitter {
   private readonly hosts = new Map<string, HostInfo>();
   private readonly sessions = new Map<string, AgentSession>();
   private readonly providers = new Map<string, AgentProvider>();
+  /** One logical launch id maps to exactly one process-backed session. */
+  private readonly launchRequests = new Map<string, LaunchRequestRecord>();
   /**
    * Client-supplied `chat.message.messageId` values already applied, keyed
    * per session, for the idempotent-resend behavior in docs/protocol.md §7.
@@ -630,6 +697,11 @@ export class SessionStore extends EventEmitter {
     return loadProviderDescriptors();
   }
 
+  getProviderCatalog(): ProvidersSnapshotPayload {
+    refreshAgentConfigs();
+    return loadProviderCatalog();
+  }
+
   getSession(id: string): AgentSession | undefined {
     const session = this.sessions.get(id);
     return session ? this.cloneSession(session) : undefined;
@@ -749,81 +821,188 @@ export class SessionStore extends EventEmitter {
    * `error` envelope; it never silently falls back to mock, and the client
    * can never supply a command/args itself, only this lookup key.
    *
-   * Returns `undefined` (after emitting a single `error` envelope) if
-   * `hostId` doesn't refer to a known host, or `providerId` doesn't match
-   * any configured+enabled terminal agent, rather than throwing — callers
-   * such as `ws.ts` dispatch this from inside a broad try/catch that would
-   * otherwise turn an intentionally-handled validation failure into a
-   * second, redundant `internal_error` envelope.
+   * Request-scoped validation failures and idempotent replays are returned to
+   * the caller instead of being emitted on the shared event bus. That keeps
+   * correlated launch replies targeted to the requesting socket and avoids
+   * replaying broadcast/audit side effects for a duplicate `requestId`.
    */
-  startSession(
-    hostId: string,
-    agentType: string,
-    title: string,
-    providerId?: string,
-    initialPrompt?: string,
-    projectId?: string,
-    resumeId?: string,
-    requestId?: string,
-    launchProfileId?: string,
-    modelId?: string,
-  ): AgentSession | undefined {
+  startSession(options: StartSessionOptions): SessionStartResult {
+    const {
+      hostId,
+      agentType,
+      title,
+      providerId,
+      initialPrompt,
+      projectId,
+      resumeId,
+      requestId,
+      launchProfileId,
+      modelId,
+      permissionProfileId,
+      toolsetId,
+      catalogRevision,
+      strictControls = false,
+    } = options;
+    let fingerprint: string | undefined;
+    let freshAttempt = true;
+    if (requestId !== undefined) {
+      if (!/^[A-Za-z0-9._-]{1,128}$/u.test(requestId)) {
+        return {
+          kind: "rejected",
+          sessionId: null,
+          code: "invalid_payload",
+          message: "requestId must be 1-128 ASCII letters, numbers, '.', '_', or '-'.",
+          requestId,
+          recoverable: false,
+          freshAttempt: false,
+        };
+      }
+      fingerprint = launchFingerprint(options);
+      const previous = this.launchRequests.get(requestId);
+      if (previous) {
+        freshAttempt = false;
+        if (previous.fingerprint !== fingerprint) {
+          return {
+            kind: "rejected",
+            sessionId: null,
+            code: "idempotency_conflict",
+            message: "The requestId was already used for a different session launch.",
+            requestId,
+            recoverable: false,
+            freshAttempt,
+          };
+        }
+        const existing = this.sessions.get(previous.sessionId);
+        if (existing) {
+          return { kind: "replayed", session: this.cloneSession(existing) };
+        }
+        this.launchRequests.delete(requestId);
+        freshAttempt = true;
+      }
+    }
     const host = this.hosts.get(hostId);
     if (!host) {
-      this.emitError(null, "invalid_payload", `Unknown hostId "${hostId}".`);
-      return undefined;
+      return {
+        kind: "rejected",
+        sessionId: null,
+        code: "invalid_payload",
+        message: `Unknown hostId "${hostId}".`,
+        requestId,
+        recoverable: false,
+        freshAttempt,
+      };
     }
 
     let terminalConfig: TerminalAgentConfig | undefined;
     let codexThreadId: string | undefined;
+    let claudeSessionId: string | undefined;
     let launchSelection: ResolvedProviderSelection | undefined;
     if (providerId !== undefined) {
       refreshAgentConfigs();
+      if (strictControls) {
+        const currentCatalog = loadProviderCatalog();
+        if (catalogRevision === undefined || catalogRevision !== currentCatalog.catalogRevision) {
+          return {
+            kind: "rejected",
+            sessionId: null,
+            code: "invalid_payload",
+            message: "The provider control catalog changed. Refresh providers and try again.",
+            requestId,
+            recoverable: false,
+            freshAttempt,
+            providerStartRejectedReason: "stale_or_invalid_controls",
+          };
+        }
+      }
       if (projectId !== undefined) {
         const resolved = projectCatalog.resolveLaunch(projectId, providerId, resumeId);
         terminalConfig = resolved?.config;
         codexThreadId = resolved?.codexThreadId;
+        claudeSessionId = resolved?.claudeSessionId;
       } else if (resumeId === undefined) {
         terminalConfig = agentConfigs.get(providerId);
       }
       if (!terminalConfig) {
-        this.emitError(
-          null,
-          "invalid_payload",
-          "Unknown, disabled, or stale project/provider selection. Refresh the catalog and try again.",
-        );
-        return undefined;
+        return {
+          kind: "rejected",
+          sessionId: null,
+          code: "invalid_payload",
+          message:
+            "Unknown, disabled, or stale project/provider selection. Refresh the catalog and try again.",
+          requestId,
+          recoverable: false,
+          freshAttempt,
+          providerStartRejectedReason: "unknown_or_disabled",
+        };
       }
     } else if (projectId !== undefined || resumeId !== undefined) {
-      this.emitError(
-        null,
-        "invalid_payload",
-        "projectId and resumeId require a host-configured providerId.",
-      );
-      return undefined;
+      return {
+        kind: "rejected",
+        sessionId: null,
+        code: "invalid_payload",
+        message: "projectId and resumeId require a host-configured providerId.",
+        requestId,
+        recoverable: false,
+        freshAttempt,
+      };
     }
 
     if (terminalConfig) {
       launchSelection = resolveProviderSelection(
-        loadProviderControls(terminalConfig.agentType),
+        loadProviderControls(terminalConfig.agentType, {
+          workingDirectory: terminalConfig.workingDirectory,
+        }),
         launchProfileId,
         modelId,
+        permissionProfileId,
+        toolsetId,
       );
       if (!launchSelection) {
-        this.emitError(
-          null,
-          "invalid_payload",
-          "Unknown or mismatched launchProfileId/modelId for the selected provider.",
-        );
-        return undefined;
+        return {
+          kind: "rejected",
+          sessionId: null,
+          code: "invalid_payload",
+          message: "Unknown or mismatched provider controls. Refresh providers and try again.",
+          requestId,
+          recoverable: false,
+          freshAttempt,
+          providerStartRejectedReason: "stale_or_invalid_controls",
+        };
       }
-    } else if (launchProfileId !== undefined || modelId !== undefined) {
-      this.emitError(
-        null,
-        "invalid_payload",
-        "launchProfileId and modelId require a host-configured providerId.",
-      );
-      return undefined;
+      if (
+        strictControls &&
+        (permissionProfileId === undefined ||
+          toolsetId === undefined ||
+          launchProfileId === undefined ||
+          modelId === undefined)
+      ) {
+        return {
+          kind: "rejected",
+          sessionId: null,
+          code: "invalid_payload",
+          message: "session.launch requires every advertised provider control id.",
+          requestId,
+          recoverable: false,
+          freshAttempt,
+          providerStartRejectedReason: "stale_or_invalid_controls",
+        };
+      }
+    } else if (
+      launchProfileId !== undefined ||
+      modelId !== undefined ||
+      permissionProfileId !== undefined ||
+      toolsetId !== undefined ||
+      strictControls
+    ) {
+      return {
+        kind: "rejected",
+        sessionId: null,
+        code: "invalid_payload",
+        message: "Provider controls require a host-configured providerId.",
+        requestId,
+        recoverable: false,
+        freshAttempt,
+      };
     }
 
     const id = nextSessionId();
@@ -835,12 +1014,15 @@ export class SessionStore extends EventEmitter {
     const session: AgentSession = {
       id,
       hostId,
+      ...(requestId !== undefined ? { requestId } : {}),
       ...(projectId !== undefined ? { projectId } : {}),
       ...(providerId !== undefined ? { providerId } : {}),
       ...(launchSelection !== undefined
         ? {
             launchProfileId: launchSelection.launchProfileId,
             modelId: launchSelection.modelId,
+            permissionProfileId: launchSelection.permissionProfileId,
+            toolsetId: launchSelection.toolsetId,
           }
         : {}),
       title,
@@ -865,51 +1047,48 @@ export class SessionStore extends EventEmitter {
       diffSummary: { en: "No files changed yet.", ja: "まだ変更されたファイルはありません。" },
     };
 
-    this.sessions.set(id, session);
-    this.syncHostCounters();
-
-    this.emit("event", {
-      type: "session.created",
-      version: 1,
-      timestamp: nowIso(),
-      sessionId: id,
-      payload: {
-        id: session.id,
-        hostId: session.hostId,
-        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
-        ...(session.providerId !== undefined ? { providerId: session.providerId } : {}),
-        ...(session.launchProfileId !== undefined
-          ? { launchProfileId: session.launchProfileId }
-          : {}),
-        ...(session.modelId !== undefined ? { modelId: session.modelId } : {}),
-        ...(requestId !== undefined ? { requestId } : {}),
-        title: session.title,
-        agentType: session.agentType,
-        sessionKind: session.sessionKind,
-        status: session.status,
-        currentSummary: { ...session.currentSummary },
-        changedFileCount: session.changedFileCount,
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-      },
-    } satisfies ServerMessage);
-
-    // Phase 16: a claudeCode entry with io "stream-json" gets the structured
-    // stream provider (real status/chat/approvals); every other terminal
-    // entry keeps the generic text path, byte-for-byte.
-    const provider: AgentProvider = terminalConfig
-      ? terminalConfig.io === "stream-json"
-        ? ClaudeCodeStreamProvider.forNewSession(session, terminalConfig, launchSelection)
-        : terminalConfig.io === "codex-jsonl"
-          ? CodexExecProvider.forNewSession(
+    let provider: AgentProvider;
+    try {
+      // Phase 16: a claudeCode entry with io "stream-json" gets the structured
+      // stream provider (real status/chat/approvals); every other terminal
+      // entry keeps the generic text path, byte-for-byte.
+      provider = terminalConfig
+        ? terminalConfig.io === "stream-json"
+          ? ClaudeCodeStreamProvider.forNewSession(
               session,
               terminalConfig,
-              codexThreadId,
               launchSelection,
+              claudeSessionId,
             )
-        : TerminalAgentProvider.forNewSession(session, terminalConfig)
-      : MockAgentProvider.forNewSession(session, nextNewSessionScenario());
+          : terminalConfig.io === "codex-jsonl"
+            ? CodexExecProvider.forNewSession(
+                session,
+                terminalConfig,
+                codexThreadId,
+                launchSelection,
+              )
+            : TerminalAgentProvider.forNewSession(session, terminalConfig)
+        : MockAgentProvider.forNewSession(session, nextNewSessionScenario());
+    } catch (err) {
+      console.error("[orbitory-host-agent] Failed to construct session provider:", err);
+      return {
+        kind: "rejected",
+        sessionId: null,
+        code: "internal_error",
+        message: "Unexpected server error while starting the session.",
+        requestId,
+        recoverable: false,
+        freshAttempt,
+      };
+    }
+
+    this.sessions.set(id, session);
+    if (requestId !== undefined && fingerprint !== undefined) {
+      this.launchRequests.set(requestId, { sessionId: id, fingerprint });
+    }
+    this.syncHostCounters();
     this.wireProvider(id, provider);
+    this.emit("event", this.makeSessionCreatedMessage(session));
 
     // docs/protocol.md §5: `initialPrompt` becomes the session's first user
     // chat message. The provider owns its transport (a running stream or a
@@ -918,7 +1097,7 @@ export class SessionStore extends EventEmitter {
       void provider.sendMessage(id, initialPrompt);
     }
 
-    return this.cloneSession(session);
+    return { kind: "created", session: this.cloneSession(session) };
   }
 
   /** Emit an `activity.summary.updated` envelope on demand for a session. */
@@ -940,21 +1119,56 @@ export class SessionStore extends EventEmitter {
 
   // -- Internal ---------------------------------------------------------------
 
-  /**
-   * Emit an `error` envelope. `recoverable` is derived from `code` per the
-   * known-code table in `docs/protocol.md` section 7 ("Error handling") —
-   * every code `sessionStore` emits today (`unknown_session`,
-   * `approval_not_found`, `invalid_payload`) is documented there as
-   * `recoverable: false` (retrying the same operation as-is will not help;
-   * the caller needs to use a valid id/payload instead).
-   */
-  private emitError(sessionId: string | null, code: string, message: string): void {
+  /** Build a `session.created` envelope without emitting it. */
+  makeSessionCreatedMessage(session: AgentSession): ServerMessage {
+    return {
+      type: "session.created",
+      version: 1,
+      timestamp: nowIso(),
+      sessionId: session.id,
+      payload: {
+        id: session.id,
+        hostId: session.hostId,
+        ...(session.projectId !== undefined ? { projectId: session.projectId } : {}),
+        ...(session.providerId !== undefined ? { providerId: session.providerId } : {}),
+        ...(session.launchProfileId !== undefined
+          ? { launchProfileId: session.launchProfileId }
+          : {}),
+        ...(session.modelId !== undefined ? { modelId: session.modelId } : {}),
+        ...(session.permissionProfileId !== undefined
+          ? { permissionProfileId: session.permissionProfileId }
+          : {}),
+        ...(session.toolsetId !== undefined ? { toolsetId: session.toolsetId } : {}),
+        ...(session.requestId !== undefined ? { requestId: session.requestId } : {}),
+        title: session.title,
+        agentType: session.agentType,
+        sessionKind: session.sessionKind,
+        status: session.status,
+        currentSummary: { ...session.currentSummary },
+        changedFileCount: session.changedFileCount,
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
+      },
+    } satisfies ServerMessage;
+  }
+
+  private emitError(
+    sessionId: string | null,
+    code: string,
+    message: string,
+    requestId?: string,
+  ): void {
     this.emit("event", {
       type: "error",
       version: 1,
       timestamp: nowIso(),
       sessionId,
-      payload: { code, message, recoverable: false },
+      payload: {
+        code,
+        message,
+        recoverable: false,
+        ...(requestId !== undefined ? { requestId } : {}),
+      },
     } satisfies ServerMessage);
   }
 }

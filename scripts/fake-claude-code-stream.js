@@ -43,6 +43,12 @@
  *                          scripted sequence (default 400ms); receiving a
  *                          chat message answers it and exits 0 immediately
  *   --delay-ms=N           pacing between scripted events (default 40ms)
+ *   --wait-for-user        after system/init, wait for stdin before emitting
+ *                          an assistant/result turn (closer to the real CLI)
+ *   --hang-on-user         with --wait-for-user, accept the message but emit
+ *                          no result (used to verify per-turn timeouts)
+ *   --exit-after-turn      with --wait-for-user, exit after a successful
+ *                          result so the provider must respawn/resume
  *
  * Every "secret" is fabricated. Nothing here touches real files, spawns
  * processes, or reads real credentials.
@@ -64,6 +70,9 @@ const printSecrets = process.argv.includes("--print-secrets");
 const malformedLines = process.argv.includes("--malformed-lines");
 const requestPermission = process.argv.includes("--request-permission");
 const permissionOnSigterm = process.argv.includes("--permission-on-sigterm");
+const waitForUser = process.argv.includes("--wait-for-user");
+const hangOnUser = process.argv.includes("--hang-on-user");
+const exitAfterTurn = process.argv.includes("--exit-after-turn");
 let handlingSigterm = false;
 
 function sleep(ms) {
@@ -152,9 +161,46 @@ function replyToUserLine(line) {
   return true;
 }
 
+function waitForUserMessages() {
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  rl.on("line", (line) => {
+    let text = "";
+    try {
+      const parsed = JSON.parse(line);
+      const content = parsed?.message?.content;
+      if (Array.isArray(content)) {
+        text = content
+          .filter((block) => block && block.type === "text" && typeof block.text === "string")
+          .map((block) => block.text)
+          .join(" ");
+      }
+    } catch {
+      return;
+    }
+    if (text.length === 0 || hangOnUser) return;
+    assistantText(`You said: ${text}`);
+    emit({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "done",
+      total_cost_usd: 0.0001,
+      usage: { input_tokens: 5, output_tokens: 5 },
+    });
+    if (exitAfterTurn) {
+      setTimeout(() => process.exit(0), 20);
+    }
+  });
+}
+
 async function main() {
   emit({ type: "system", subtype: "init", session_id: "fake-stream-session-0001", model: "claude-fake-1" });
   await sleep(delayMs);
+
+  if (waitForUser) {
+    waitForUserMessages();
+    return;
+  }
 
   if (requestPermission) {
     await postPermissionRequest();

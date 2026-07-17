@@ -61,6 +61,11 @@ const WORKING_SUMMARY: Localized = {
   ja: "Codex が作業しています。",
 };
 
+const RETRY_TURN_SUMMARY: Localized = {
+  en: "This Codex turn failed. The session is still available; retry your message.",
+  ja: "Codex のこのターンは失敗しました。セッションは引き続き利用できます。メッセージを再送してください。",
+};
+
 const REDACTED_PATH = "[REDACTED_PATH]";
 
 interface ActiveTurn {
@@ -72,6 +77,7 @@ interface ActiveTurn {
   sawTurnCompleted: boolean;
   eventFailed: boolean;
   privateFailureReason?: Localized;
+  recoverableFailureReason?: Localized;
   timedOut: boolean;
   finalized: boolean;
   receivedBytes: number;
@@ -199,21 +205,31 @@ export class CodexExecProvider implements AgentProvider {
   }
 
   private framePrompt(text: string): string {
+    const toolInstruction = this.selection?.includesSkills
+      ? "Use the project's host-configured Skills when they are relevant.\n\n"
+      : "";
+    if (this.selection?.permissionMode === "observe") {
+      return [
+        "Orbitory observe access: inspect and explain only. Do not modify files or run write-capable commands.",
+        "",
+        toolInstruction + text,
+      ].join("\n");
+    }
     switch (this.selection?.intent) {
       case "plan":
         return [
           "Orbitory plan mode: analyze and produce a concrete plan only. Do not modify files or run write-capable commands.",
           "",
-          text,
+          toolInstruction + text,
         ].join("\n");
       case "review":
         return [
           "Orbitory review mode: inspect the current project and report correctness, security, and test gaps. Do not modify files.",
           "",
-          text,
+          toolInstruction + text,
         ].join("\n");
       default:
-        return text;
+        return toolInstruction + text;
     }
   }
 
@@ -405,9 +421,13 @@ export class CodexExecProvider implements AgentProvider {
       case "turnFailed":
       case "processError":
         turn.eventFailed = true;
-        turn.privateFailureReason = classifyCodexFailureText(
-          this.scrubProcessText(event.message),
-        );
+        turn.privateFailureReason = classifyCodexFailureText(this.scrubProcessText(event.message));
+        if (this.threadId && !turn.privateFailureReason) {
+          this.pendingMessages.length = 0;
+          turn.recoverableFailureReason = RETRY_TURN_SUMMARY;
+          this.terminateWithEscalation(turn);
+          return;
+        }
         this.failSession(
           turn.privateFailureReason ?? {
             en: "The Codex turn failed.",
@@ -477,8 +497,17 @@ export class CodexExecProvider implements AgentProvider {
       }
       return;
     }
+    if (turn.recoverableFailureReason && !this.isTerminal(this.session.status)) {
+      this.setStatus("idle", turn.recoverableFailureReason);
+      return;
+    }
     if (turn.eventFailed || this.isTerminal(this.session.status)) return;
     if (code !== 0 || signal !== null) {
+      if (this.threadId && !turn.privateFailureReason && signal === null) {
+        this.pendingMessages.length = 0;
+        this.setStatus("idle", RETRY_TURN_SUMMARY);
+        return;
+      }
       this.failSession(
         turn.privateFailureReason ?? {
           en: signal ? `Codex was terminated by signal ${signal}.` : `Codex exited with code ${code}.`,
@@ -646,6 +675,7 @@ export class CodexExecProvider implements AgentProvider {
     if (this.isTerminal(this.session.status)) return;
     this.pendingMessages.length = 0;
     this.session.status = "failed";
+    this.session.currentSummary = { ...reason };
     this.session.approvalRequired = false;
     this.session.approvalRequest = null;
     this.session.updatedAt = nowIso();

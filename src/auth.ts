@@ -56,7 +56,7 @@ export function setPairedDeviceStoreForTests(store: PairedDeviceStore): void {
  * Constant-time string compare via fixed-length SHA-256 digests, so neither the
  * token length nor an early-mismatch position leaks through timing.
  */
-function constantTimeEqual(a: string, b: string): boolean {
+export function pairingTokensEqual(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a, "utf8").digest();
   const hb = createHash("sha256").update(b, "utf8").digest();
   return timingSafeEqual(ha, hb);
@@ -88,7 +88,7 @@ export function verifyPresentedToken(
     STATIC_TOKEN_ENABLED &&
     typeof token === "string" &&
     token.length > 0 &&
-    constantTimeEqual(token, PAIRING_TOKEN)
+    pairingTokensEqual(token, PAIRING_TOKEN)
   ) {
     return { ok: true, kind: "static" };
   }

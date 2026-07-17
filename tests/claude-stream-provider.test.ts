@@ -6,8 +6,9 @@
  * against a real server — never the real Claude Code. Covers: the status
  * sequence, chat round-trip (stdin bytes in, chat.message envelope out),
  * diff.updated + tests.started/finished, secrets never reaching ANY sink,
- * malformed-line passthrough (scrubbed + truncated, no crash), crash →
- * session.failed, auth-failure copy, stop, maxRuntimeSeconds, the approval
+ * malformed-line passthrough (scrubbed + truncated, no crash), recoverable
+ * child exits/timeouts, terminal auth-failure copy, stop, per-turn runtime,
+ * transparent respawn/resume, the approval
  * round-trip (approve, deny, timeout-deny) through the real loopback bridge
  * endpoint, config-level `io` validation, and `sessionKind: "real"`.
  */
@@ -172,6 +173,16 @@ function sessionEnvelopes(sessionId: string): Envelope<unknown>[] {
   return client.received.filter((e) => e.sessionId === sessionId);
 }
 
+function waitForIdle(sessionId: string, timeoutMs = 8000): Promise<Envelope<unknown>> {
+  return client.waitFor(
+    (e) =>
+      e.type === "agent.status.changed" &&
+      e.sessionId === sessionId &&
+      (e.payload as { status?: string }).status === "idle",
+    timeoutMs,
+  );
+}
+
 describe("stream session lifecycle", () => {
   test("session.created is claudeCode + sessionKind real; statuses follow the stream", async () => {
     start("claude-stream-fake");
@@ -182,7 +193,7 @@ describe("stream session lifecycle", () => {
     assert.equal(createdPayload.sessionKind, "real");
     const sessionId = created.sessionId!;
 
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
 
     // Status sequence: searching (Read) before editing (Edit) before testing
     // (Bash npm test) before idle (result success).
@@ -210,9 +221,10 @@ describe("stream session lifecycle", () => {
       "approval bridge banner expected",
     );
     assert.ok(
-      lines.some((l) => l.startsWith("[orbitory] claude session fake-stream-session-0001")),
+      lines.some((l) => l.startsWith("[orbitory] claude session started")),
       "claude session line expected",
     );
+    assert.equal(JSON.stringify(lines).includes("fake-stream-session-0001"), false);
     assert.ok(
       lines.some((l) => l === "[orbitory] turn finished (tokens 100/250, cost $0.0123)"),
       `turn-finished line expected in ${JSON.stringify(lines)}`,
@@ -234,7 +246,7 @@ describe("stream session lifecycle", () => {
     assert.equal(payload.text, "I found the bug; fixing it now.");
     assert.ok(payload.messageId && payload.messageId.startsWith("msg_"));
 
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
 
     // The message is also part of the REST snapshot (session.messages).
     const res = await fetch(`${server.httpUrl}/sessions?token=${encodeURIComponent(PAIRING_TOKEN!)}`);
@@ -274,7 +286,7 @@ describe("stream session lifecycle", () => {
     assert.equal(testStatus.failedCount, 0);
     assert.equal(testStatus.durationSeconds, 1.2);
 
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
   });
 });
 
@@ -310,8 +322,45 @@ describe("chat round-trip over stdin", () => {
     );
     assert.equal((reply.payload as { role?: string }).role, "assistant");
 
-    // The fake exits 0 right after replying → completed.
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 5000);
+    // A clean child exit keeps the room resumable instead of completing it.
+    await waitForIdle(sessionId, 5000);
+  });
+
+  test("a clean child exit transparently respawns and resumes for the next message", async () => {
+    start("claude-stream-resumable", { initialPrompt: "first turn" });
+    const created = await client.waitFor((e) => e.type === "session.created", 3000);
+    const sessionId = created.sessionId!;
+
+    await client.waitFor(
+      (e) =>
+        e.type === "chat.message" &&
+        e.sessionId === sessionId &&
+        (e.payload as { text?: string }).text === "You said: first turn",
+      5000,
+    );
+    await waitForIdle(sessionId, 5000);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    client.send({
+      type: "chat.message",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId,
+      payload: { messageId: "stream_resume_2", text: "second turn" },
+    });
+
+    await client.waitFor(
+      (e) =>
+        e.type === "chat.message" &&
+        e.sessionId === sessionId &&
+        (e.payload as { text?: string }).text === "You said: second turn",
+      5000,
+    );
+    await waitForIdle(sessionId, 5000);
+    assert.equal(
+      sessionEnvelopes(sessionId).some((e) => e.type === "session.failed"),
+      false,
+    );
   });
 });
 
@@ -329,6 +378,13 @@ describe("failure paths", () => {
     assert.match(reason.en, /`claude auth login`/);
     assert.match(reason.ja, /ログイン/);
     assert.match(reason.ja, /`claude auth login`/);
+
+    const response = await fetch(
+      `${server.httpUrl}/sessions?token=${encodeURIComponent(PAIRING_TOKEN!)}`,
+    );
+    const body = (await response.json()) as { sessions: AgentSession[] };
+    const stored = body.sessions.find((session) => session.id === sessionId);
+    assert.match(stored?.currentSummary.en ?? "", /expired or is unavailable/i);
   });
 
   test("an auth-failed stream child is terminated instead of lingering", async () => {
@@ -350,15 +406,16 @@ describe("failure paths", () => {
     assert.equal((terminated.payload as { stream: string }).stream, "stdout");
   });
 
-  test("a mid-stream crash (--exit-code=3, no result event) → session.failed with the exit code", async () => {
+  test("a mid-stream crash returns the room to a resumable idle state", async () => {
     start("claude-stream-crash");
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
-    const failed = await client.waitFor(
-      (e) => e.type === "session.failed" && e.sessionId === sessionId,
-      8000,
+    const idle = await waitForIdle(sessionId);
+    assert.match(
+      (idle.payload as { currentSummary: { en: string } }).currentSummary.en,
+      /exited with code 3/,
     );
-    assert.match((failed.payload as { reason: { en: string } }).reason.en, /exited with code 3/);
+    assert.equal(sessionEnvelopes(sessionId).some((e) => e.type === "session.failed"), false);
   });
 
   test("session.stop terminates a lingering stream session quickly ('Stopped by user.')", async () => {
@@ -420,34 +477,29 @@ describe("failure paths", () => {
     );
   });
 
-  test("maxRuntimeSeconds kills a lingering session with the runtime reason", async () => {
-    start("claude-stream-slow");
+  test("maxRuntimeSeconds limits one active turn and leaves the room resumable", async () => {
+    start("claude-stream-slow", { initialPrompt: "hang this turn" });
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
     const startedAt = Date.now();
-    const failed = await client.waitFor(
-      (e) => e.type === "session.failed" && e.sessionId === sessionId,
-      8000,
-    );
+    const idle = await waitForIdle(sessionId);
     assert.ok(Date.now() - startedAt < 6000, "runtime ceiling should fire at ~1s");
     assert.match(
-      (failed.payload as { reason: { en: string } }).reason.en,
-      /exceeded its maximum runtime \(1s\)/,
+      (idle.payload as { currentSummary: { en: string } }).currentSummary.en,
+      /turn exceeded 1s/,
     );
+    assert.equal(sessionEnvelopes(sessionId).some((e) => e.type === "session.failed"), false);
   });
 
   test("maxRuntimeSeconds unregisters the approval bridge before terminating the child", async () => {
-    start("claude-stream-timeout-late-permission");
+    start("claude-stream-timeout-late-permission", { initialPrompt: "hang this turn" });
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
     const cursor = client.received.length;
-    const failed = await client.waitFor(
-      (e) => e.type === "session.failed" && e.sessionId === sessionId,
-      8000,
-    );
+    const idle = await waitForIdle(sessionId);
     assert.match(
-      (failed.payload as { reason: { en: string } }).reason.en,
-      /exceeded its maximum runtime \(1s\)/,
+      (idle.payload as { currentSummary: { en: string } }).currentSummary.en,
+      /turn exceeded 1s/,
     );
 
     const afterTimeout = client.received.slice(cursor).filter((e) => e.sessionId === sessionId);
@@ -464,7 +516,7 @@ describe("scrubbing across every sink", () => {
     start("claude-stream-secrets");
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
 
     const rawSecrets = [
       "sk-ant-api03-fakeclaudefake1234", // assistant text + tool_result
@@ -514,7 +566,7 @@ describe("malformed stream lines", () => {
     start("claude-stream-malformed");
     const created = await client.waitFor((e) => e.type === "session.created", 3000);
     const sessionId = created.sessionId!;
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
 
     const lines = sessionEnvelopes(sessionId)
       .filter((e) => e.type === "terminal.output")
@@ -591,7 +643,7 @@ describe("approval round-trip through the loopback bridge", () => {
         (e.payload as { text: string }).text === "permission-allowed",
       5000,
     );
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
   });
 
   test("reject: the fake observes the deny with the user-deny message", async () => {
@@ -627,8 +679,8 @@ describe("approval round-trip through the loopback bridge", () => {
         (e.payload as { text: string }).text.startsWith("permission-denied:"),
       5000,
     );
-    // A denied permission doesn't kill the session; the fake continues and completes.
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    // A denied permission doesn't kill the session; the fake returns to idle.
+    await waitForIdle(sessionId);
   });
 
   test("timeout: nobody answers → deny with approval.resolved resolvedBy timeout", async () => {
@@ -653,7 +705,7 @@ describe("approval round-trip through the loopback bridge", () => {
         (e.payload as { text: string }).text.startsWith("permission-denied:"),
       6000,
     );
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
   });
 
   test("no bridge token appears in any envelope of a permission session", async () => {
@@ -675,7 +727,7 @@ describe("approval round-trip through the loopback bridge", () => {
         scope: "once",
       },
     });
-    await client.waitFor((e) => e.type === "session.completed" && e.sessionId === sessionId, 8000);
+    await waitForIdle(sessionId);
 
     // The bridge token is 43 chars of base64url; assert that no envelope
     // carries any base64url run that long except message ids (which are

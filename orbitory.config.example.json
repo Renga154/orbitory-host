@@ -96,5 +96,13 @@
         "pidsLimit": 256
       }
     }
-  ]
+  ],
+  "projectCatalog": {
+    "creation": {
+      "enabled": false,
+      "rootDirectory": "..",
+      "providerIds": ["claude-code-stream"],
+      "maxProjects": 100
+    }
+  }
 }

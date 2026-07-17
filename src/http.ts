@@ -34,6 +34,7 @@ interface SessionsResponse {
 }
 
 interface ProvidersResponse {
+  catalogRevision: string;
   providers: ProviderDescriptor[];
 }
 
@@ -147,9 +148,7 @@ export async function registerHttpRoutes(
     "/providers",
     { preHandler: requirePairingToken },
     async (): Promise<ProvidersResponse> => {
-      return {
-        providers: sessionStore.getProviderDescriptors(),
-      };
+      return sessionStore.getProviderCatalog();
     },
   );
 

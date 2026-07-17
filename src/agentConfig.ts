@@ -22,10 +22,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 
 import type {
   AgentType,
   ProviderDescriptor,
+  ProvidersSnapshotPayload,
   ProviderNetworkPolicy,
   ProviderUnavailableReason,
   RiskLevel,
@@ -480,6 +482,14 @@ export interface CodexHistoryDiscoveryConfig {
   maxSessions: number;
 }
 
+/** Explicit host-local boundary for phone-requested empty project creation. */
+export interface ProjectCreationConfig {
+  enabled: true;
+  rootDirectory: string;
+  providerIds: string[];
+  maxProjects: number;
+}
+
 export function defaultConfigPath(): string {
   return (
     process.env["ORBITORY_AGENT_CONFIG_PATH"] ??
@@ -633,6 +643,45 @@ function validateEntry(
     return undefined;
   }
 
+  const configuredArgs = (raw.args as string[] | undefined) ?? [];
+  const reservedArgs =
+    raw.io === "stream-json"
+      ? new Set([
+          "--allowedTools",
+          "--disallowedTools",
+          "--permission-mode",
+          "--permission-prompt-tool",
+          "--mcp-config",
+          "--strict-mcp-config",
+          "--dangerously-skip-permissions",
+          "--model",
+        ])
+      : raw.io === "codex-jsonl"
+        ? new Set([
+            "-a",
+            "--ask-for-approval",
+            "-c",
+            "--config",
+            "-m",
+            "--model",
+            "-s",
+            "--sandbox",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--ignore-user-config",
+          ])
+        : new Set<string>();
+  const reservedConfiguredArg = configuredArgs.find((arg) => {
+    const flag = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    return reservedArgs.has(flag);
+  });
+  if (reservedConfiguredArg !== undefined) {
+    console.warn(
+      `[orbitory-host-agent] ${label} ("${raw.id}"): args contains an Orbitory-managed ` +
+        `permission/model/MCP flag; remove it and select the advertised control id instead. Skipping.`,
+    );
+    return undefined;
+  }
+
   // Fail closed: an entry with no explicit "enabled": true is treated as
   // disabled, so simply adding an entry to the file (e.g. while editing it)
   // never accidentally makes a new command launchable.
@@ -718,7 +767,7 @@ function validateEntry(
     displayName: typeof raw.displayName === "string" && raw.displayName.trim().length > 0 ? raw.displayName : raw.id,
     agentType,
     command: raw.command,
-    args: (raw.args as string[] | undefined) ?? [],
+    args: configuredArgs,
     workingDirectory: resolvedWorkingDirectory,
     maxRuntimeSeconds: (raw.maxRuntimeSeconds as number | undefined) ?? DEFAULT_MAX_RUNTIME_SECONDS,
     approvalTimeoutSeconds:
@@ -814,6 +863,102 @@ export function loadCodexHistoryDiscoveryConfig(
       new Set(additionalProviderIds.filter((providerId) => providerId !== value["providerId"])),
     ),
     maxSessions,
+  };
+}
+
+/**
+ * Load the opt-in project creation root. The phone never sees this path and
+ * can create only one validated direct child beneath it.
+ */
+export function loadProjectCreationConfig(
+  configPath: string = defaultConfigPath(),
+): ProjectCreationConfig | undefined {
+  if (!fs.existsSync(configPath)) return undefined;
+
+  let raw: RawAgentConfigFile;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, "utf8")) as RawAgentConfigFile;
+  } catch {
+    return undefined;
+  }
+  if (
+    typeof raw.projectCatalog !== "object" ||
+    raw.projectCatalog === null ||
+    Array.isArray(raw.projectCatalog)
+  ) {
+    return undefined;
+  }
+  const creation = (raw.projectCatalog as Record<string, unknown>)["creation"];
+  if (creation === undefined) return undefined;
+  if (typeof creation !== "object" || creation === null || Array.isArray(creation)) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: "projectCatalog.creation" must be an object; creation disabled.`,
+    );
+    return undefined;
+  }
+
+  const value = creation as Record<string, unknown>;
+  if (value["enabled"] !== true) return undefined;
+  const rootDirectoryValue = value["rootDirectory"];
+  if (typeof rootDirectoryValue !== "string" || rootDirectoryValue.trim().length === 0) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: enabled project creation needs rootDirectory; disabled.`,
+    );
+    return undefined;
+  }
+  const providers = value["providerIds"];
+  if (
+    !Array.isArray(providers) ||
+    providers.length < 1 ||
+    providers.length > 20 ||
+    providers.some(
+      (providerId) =>
+        typeof providerId !== "string" ||
+        providerId.trim().length === 0 ||
+        providerId.length > 128,
+    )
+  ) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: project creation providerIds must contain 1-20 provider ids; disabled.`,
+    );
+    return undefined;
+  }
+  const maxProjects = value["maxProjects"] ?? 100;
+  if (
+    typeof maxProjects !== "number" ||
+    !Number.isInteger(maxProjects) ||
+    maxProjects < 1 ||
+    maxProjects > 500
+  ) {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: project creation maxProjects must be an integer from 1 to 500; disabled.`,
+    );
+    return undefined;
+  }
+
+  const configuredRoot = path.resolve(
+    path.dirname(path.resolve(configPath)),
+    rootDirectoryValue,
+  );
+  let rootDirectory: string;
+  try {
+    rootDirectory = fs.realpathSync(configuredRoot);
+    if (!fs.statSync(rootDirectory).isDirectory()) return undefined;
+  } catch {
+    console.warn(
+      `[orbitory-host-agent] ${configPath}: project creation root does not exist or is not a directory; disabled.`,
+    );
+    return undefined;
+  }
+  if (!confinedWorkingDirectoryIsSafe(rootDirectory, "projectCatalog.creation")) {
+    return undefined;
+  }
+
+  return {
+    enabled: true,
+    rootDirectory,
+    providerIds: Array.from(new Set(providers as string[])),
+    maxProjects,
   };
 }
 
@@ -971,7 +1116,9 @@ function providerWarnings(
 /** Build a startable descriptor from a loaded (valid, enabled) config. */
 function descriptorForLoadedConfig(config: TerminalAgentConfig): ProviderDescriptor {
   const sb = config.sandbox;
-  const controls = loadProviderControls(config.agentType);
+  const controls = loadProviderControls(config.agentType, {
+    workingDirectory: config.workingDirectory,
+  });
   // Risk/network/warnings reflect what's actually ENFORCED (effectiveMode); the
   // displayed sandboxMode is what was REQUESTED (so a downgraded-to-none entry
   // honestly reads "requested container, unsupported, running unsandboxed").
@@ -990,6 +1137,8 @@ function descriptorForLoadedConfig(config: TerminalAgentConfig): ProviderDescrip
     warnings: providerWarnings(config.agentType, sb.effectiveMode, sb.allowNetwork, sb.supported),
     launchProfiles: controls.launchProfiles,
     models: controls.models,
+    permissionProfiles: controls.permissionProfiles,
+    toolsets: controls.toolsets,
   };
 }
 
@@ -1052,6 +1201,8 @@ function descriptorForRejectedEntry(raw: RawAgentConfigEntry): ProviderDescripto
     warnings: providerWarnings(agentType, mode, allowNetwork, sandboxSupported),
     launchProfiles: controls.launchProfiles,
     models: controls.models,
+    permissionProfiles: controls.permissionProfiles,
+    toolsets: controls.toolsets,
   };
 }
 
@@ -1105,4 +1256,32 @@ export function loadProviderDescriptors(
   }
 
   return descriptors;
+}
+
+/**
+ * Provider snapshot plus an opaque freshness revision. The revision also
+ * covers private control inputs (for example the hash of a selected project
+ * .mcp.json) without exposing those inputs to a client.
+ */
+export function loadProviderCatalog(
+  configPath: string = defaultConfigPath(),
+  validConfigs: Map<string, TerminalAgentConfig> = agentConfigs,
+): ProvidersSnapshotPayload {
+  const providers = loadProviderDescriptors(configPath, validConfigs);
+  const privateDigests = [...validConfigs.values()]
+    .map((config) => ({
+      id: config.id,
+      digest: loadProviderControls(config.agentType, {
+        workingDirectory: config.workingDirectory,
+      }).catalogDigest,
+    }))
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const digest = createHash("sha256")
+    .update(JSON.stringify({ providers, privateDigests }))
+    .digest("hex")
+    .slice(0, 16);
+  return {
+    catalogRevision: `pcat_${digest}`,
+    providers,
+  };
 }

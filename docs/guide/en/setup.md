@@ -88,15 +88,33 @@ and raw Codex thread ids stay on the computer. Revoke it by rerunning
 `npx orbitory-host@latest --setup codex --yes` without the history flag (or by disabling
 `projectCatalog.codexHistory`).
 
-To let Claude Code start **new** sessions in the same explicitly discovered project folders:
+To let Claude Code start new sessions and resume recent Claude chats in explicitly discovered
+project folders:
 
 ```bash
 npx orbitory-host@latest --setup claude --include-recent-projects --yes
 ```
 
-This adds the Claude provider to the host-local broad-access allowlist. It does not read private
-Claude history and cannot resume Claude tasks; Codex remains the source of the sanitized folder
-catalog. Rerun Claude setup without `--include-recent-projects` to revoke that access.
+This adds the Claude provider to the host-local broad-access allowlist. Orbitory then performs an
+experimental, metadata-only scan of direct recent Claude session files. Only the project, update
+time, real session id, and saved short title/slug remain on the computer; the phone gets opaque ids
+and sanitized labels. Conversation text, tool data, source, diffs, paths, credentials, nested
+subagent sessions, and real session ids are not sent to the phone. Rerun Claude setup without
+`--include-recent-projects` to revoke both broad project access and Claude history resume.
+
+To allow new empty projects from Orbitory, approve one parent folder and each provider explicitly:
+
+```bash
+npx orbitory-host@latest --setup codex --allow-project-creation --project-root "$HOME/Development" --yes
+npx orbitory-host@latest --setup claude --allow-project-creation --project-root "$HOME/Development" --yes
+```
+
+The phone receives only the provider ids and maximum name length. It sends a project name and an
+opaque provider id, never the approved root or a path. The host creates one direct child with a
+private ownership marker and rejects traversal, separators, symlinks, and folders it did not create.
+Rerun guided setup for that provider and answer **No** to revoke creation, or remove the provider
+from `projectCatalog.creation.providerIds`. A non-interactive `--yes` setup without the creation
+flag preserves the existing choice.
 
 Provider management remains local:
 
@@ -119,6 +137,15 @@ Press `Ctrl-C` in the terminal. The host-agent will close the server and withdra
 - Provider says Unavailable: rerun `npx orbitory-host@latest --setup` in the project folder, then tap Refresh. The latest host reloads config changes automatically.
 - Provider CLI not found: install it from the official URL printed by setup, then rerun the same command. Orbitory does not install or impersonate an AI provider.
 - Claude says logged in but a session reports authentication failure: the local credential is stale. Run `claude auth login`, approve the official Claude page, then rerun `npx orbitory-host@latest --setup claude --yes`.
+- **New project** is missing in the app: rerun setup with `--allow-project-creation` and
+  `--project-root`, then tap Refresh. The button is shown only when the connected host advertises
+  the sanitized creation capability.
+- A project name is rejected: use a normal new folder name directly under the approved root. Orbitory
+  deliberately refuses paths, traversal, hidden/reserved names, symlinks, and existing folders.
+- An old room was left idle overnight: reconnect and send the next instruction in the same room. The
+  active-turn limit no longer expires an idle room; the host respawns Claude and resumes its host-held
+  session. A genuinely terminal authentication/state failure hides the composer and offers a new-room
+  recovery action instead.
 - Multiple `claude` installations exist: rerun setup in the same project folder. Orbitory preserves the absolute executable already pinned in that folder's provider config; remove or reorder stale duplicates separately if desired.
 - `EADDRINUSE ... 0.0.0.0:4000`: this is not an AI login failure. Another process already owns port 4000. If it is an Orbitory host, do not start a second copy; tap Refresh. If it is an older host, stop its terminal with `Ctrl-C`, then rerun `npx orbitory-host@latest`.
 - nvm warns about `.npmrc` `prefix/globalconfig`: this is a Node.js environment warning, separate from Orbitory's provider config. If the command continues, setup can still succeed. If needed, run the `nvm use --delete-prefix <version> --silent` command shown in the warning.

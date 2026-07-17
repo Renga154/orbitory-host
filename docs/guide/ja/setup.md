@@ -79,13 +79,22 @@ npx orbitory-host@latest --setup codex --include-codex-projects --yes
 
 これはCodexの実験的なローカルapp-serverを、時間・件数を制限した読み取り専用の履歴一覧取得にだけ使用します。app-serverの書き込み状態は一時領域に隔離し、Codexの認証情報や設定はそこへコピーしません。ペアリング済みiPhoneから対象プロジェクトを開始・再開できる広い権限になるため、内容を理解した場合だけ有効化してください。パス、プロンプト本文、Codexの生thread IDはPC側だけに保持されます。履歴アクセスは `npx orbitory-host@latest --setup codex --yes` を履歴フラグなしで再実行するか、`projectCatalog.codexHistory` を無効にすると取り消せます。
 
-Claude Codeでも同じ検出フォルダで**新規**セッションを開始する場合は、明示的に許可します。
+Claude Codeでも検出フォルダで新規セッションを開始し、最近のClaudeチャットを再開する場合は、明示的に許可します。
 
 ```bash
 npx orbitory-host@latest --setup claude --include-recent-projects --yes
 ```
 
-これはClaudeをホスト側の広域プロジェクト許可に追加します。Claudeの非公開履歴は読まず、Claudeセッションの再開はできません。検出フォルダはCodexのサニタイズ済み一覧を使います。取り消すには `--include-recent-projects` なしでClaudeセットアップを再実行します。
+これはClaudeをホスト側の広域プロジェクト許可に追加し、直下の最近Claudeセッションからメタデータだけを実験的に取得します。プロジェクト、更新時刻、実セッションID、保存済みの短いタイトルはPC側に保持し、iPhoneへは不透明IDとサニタイズ済み表示名だけを送ります。会話本文、ツール入出力、ソース、diff、実パス、認証情報、サブエージェント履歴、実セッションIDは送りません。取り消すには `--include-recent-projects` なしでClaudeセットアップを再実行します。
+
+Orbitoryから空の新規プロジェクトを作れるようにする場合は、親フォルダと各プロバイダーをPC上で明示的に許可します。
+
+```bash
+npx orbitory-host@latest --setup codex --allow-project-creation --project-root "$HOME/Development" --yes
+npx orbitory-host@latest --setup claude --allow-project-creation --project-root "$HOME/Development" --yes
+```
+
+iPhoneが受け取るのは許可されたプロバイダーIDと名前の最大長だけです。送信するのもプロジェクト名と不透明なプロバイダーIDだけで、許可した親フォルダやパスは送りません。hostは親フォルダ直下に空フォルダと非公開の所有マーカーを作り、パストラバーサル、区切り文字、シンボリックリンク、hostが作っていない既存フォルダを拒否します。権限を取り消すには、そのプロバイダーの対話セットアップを再実行して新規作成を「No」にするか、`projectCatalog.creation.providerIds` から対象を外します。作成フラグなしの非対話 `--yes` セットアップは現在の選択を維持します。
 
 プロバイダーの管理は引き続きPC上だけで行います。
 
@@ -108,6 +117,9 @@ npx orbitory-host@latest --remove-provider <provider-id>
 - プロバイダーが「利用不可」: 作業フォルダで `npx orbitory-host@latest --setup` を再実行し、Orbitoryで「更新」を押してください。最新ホストは設定を自動再読込します。
 - プロバイダーCLIが見つからない: セットアップが表示する公式URLからインストールし、同じコマンドを再実行します。OrbitoryがAIプロバイダー自体をインストールしたり、代わりに認証したりすることはありません。
 - Claudeがログイン済みと表示するのに認証失敗する: ローカル認証情報が古くなっています。`claude auth login` を実行し、Claude公式ページで承認後、`npx orbitory-host@latest --setup claude --yes` を再実行します。
+- アプリに「新規プロジェクト」が表示されない: `--allow-project-creation` と `--project-root` を付けてセットアップを再実行し、アプリで「更新」を押します。接続中のhostが安全な作成権限を通知した場合だけ表示されます。
+- プロジェクト名が拒否される: 許可した親フォルダ直下に作る通常の新しい名前を使用してください。パス、`..`、隠し/予約名、シンボリックリンク、既存フォルダは意図的に受け付けません。
+- 一晩空けた既存ルームがある: 再接続後、そのルームで次の指示を送ってください。実行時間の上限は待機中の部屋を期限切れにせず、hostがClaudeを再起動してPC内のセッションを再開します。本当に認証/状態エラーで終了した場合は入力欄を隠し、新しいルームを作る復旧操作を表示します。
 - `claude` が複数インストールされている: 同じプロジェクトフォルダでセットアップを再実行します。Orbitoryはそのフォルダの設定に保存済みの絶対パスを維持します。不要な古いCLIの削除やPATH順の整理は必要に応じて別途行ってください。
 - `EADDRINUSE ... 0.0.0.0:4000`: AI連携の失敗ではなく、4000番ポートで別のホストが起動中です。すでにOrbitory hostが動いている場合は二重起動せず、アプリで「更新」を押します。古いhostの場合はそのターミナルで `Ctrl-C` を押し、`npx orbitory-host@latest` を起動し直します。
 - nvmが `.npmrc` の `prefix/globalconfig` 警告を出す: Orbitoryの設定結果とは別のNode.js環境警告です。コマンドが続行していれば設定自体は可能です。必要な場合は警告に表示された `nvm use --delete-prefix <version> --silent` を実行します。

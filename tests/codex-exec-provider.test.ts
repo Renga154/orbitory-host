@@ -367,6 +367,100 @@ describe("CodexExecProvider", () => {
     assert.equal(events.some((event) => event.type === "session.completed"), false);
   });
 
+  test("keeps a resumable thread available after one unclassified turn failure", async () => {
+    const provider = CodexExecProvider.forNewSession(
+      makeSession(),
+      makeConfig({ command: FAKE_CODEX_EXEC, args: ["--scenario=recoverable-turn-failure"] }),
+    );
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" && candidate.payload.status === "idle",
+    );
+
+    await provider.sendMessage("session_codex_exec_test", "establish recoverable thread");
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "chat.message" &&
+        candidate.payload.text === "Recoverable thread established.",
+      5_000,
+    );
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" && candidate.payload.status === "idle",
+      5_000,
+    );
+
+    await provider.sendMessage("session_codex_exec_test", "transient failure");
+    const retryable = await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" &&
+        candidate.payload.status === "idle" &&
+        candidate.payload.currentSummary.en.includes("retry"),
+      5_000,
+    );
+    assert.equal(retryable.type, "agent.status.changed");
+    assert.equal(provider.getStatus("session_codex_exec_test")?.status, "idle");
+
+    await provider.sendMessage("session_codex_exec_test", "retry after failure");
+    const recovered = await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "chat.message" && candidate.payload.text === "Recovered on the next turn.",
+      5_000,
+    );
+    assert.equal(recovered.type, "chat.message");
+  });
+
+  test("keeps a resumable thread available after an unclassified nonzero exit", async () => {
+    const provider = CodexExecProvider.forNewSession(
+      makeSession(),
+      makeConfig({ command: FAKE_CODEX_EXEC, args: ["--scenario=recoverable-turn-failure"] }),
+    );
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" && candidate.payload.status === "idle",
+    );
+    await provider.sendMessage("session_codex_exec_test", "establish recoverable thread");
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "chat.message" &&
+        candidate.payload.text === "Recoverable thread established.",
+      5_000,
+    );
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" && candidate.payload.status === "idle",
+      5_000,
+    );
+
+    await provider.sendMessage("session_codex_exec_test", "abrupt failure");
+    await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "agent.status.changed" &&
+        candidate.payload.status === "idle" &&
+        candidate.payload.currentSummary.en.includes("retry"),
+      5_000,
+    );
+
+    await provider.sendMessage("session_codex_exec_test", "retry after abrupt failure");
+    const recovered = await waitForEvent(
+      provider,
+      (candidate) =>
+        candidate.type === "chat.message" &&
+        candidate.payload.text === "Recovered after the abrupt failure.",
+      5_000,
+    );
+    assert.equal(recovered.type, "chat.message");
+  });
+
   test("never emits or stores raw thread ids, host paths, or process secrets", async () => {
     const provider = CodexExecProvider.forNewSession(
       makeSession(),
@@ -497,6 +591,9 @@ describe("CodexExecProvider", () => {
       assert.match(failed.payload.reason.en, /saved Codex session is no longer available/);
       assert.equal(failed.payload.reason.en.includes(privateThreadId), false);
     }
+    const snapshot = provider.getStatus("session_codex_exec_test");
+    assert.match(snapshot?.currentSummary.en ?? "", /saved Codex session is no longer available/);
+    assert.equal(snapshot?.currentSummary.en.includes(privateThreadId), false);
   });
 
   test("scrubs oversized assistant text before applying the shared line cap", async () => {

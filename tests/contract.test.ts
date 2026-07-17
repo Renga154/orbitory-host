@@ -80,9 +80,24 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
       "initialPrompt",
     ],
   },
+  "session.launch": {
+    required: [
+      "catalogRevision",
+      "hostId",
+      "agentType",
+      "title",
+      "providerId",
+      "launchProfileId",
+      "modelId",
+      "permissionProfileId",
+      "toolsetId",
+    ],
+    optional: ["projectId", "resumeId", "requestId", "initialPrompt"],
+  },
   "session.request_summary": { required: [] }, // SessionRequestSummaryPayload = Record<string, never>
   "providers.request": { required: [] }, // ProvidersRequestPayload = Record<string, never>
   "projects.request": { required: [] },
+  "project.create": { required: ["requestId", "name", "providerId"] },
   "audit.request": { required: [] }, // AuditRequestPayload = Record<string, never>
 
   // -- Server -> client (src/types.ts Server*Payload) -----------------------
@@ -90,8 +105,12 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
     required: ["serverName", "serverVersion", "protocolVersion", "hostId", "capabilities"],
   },
   "session.snapshot": { required: ["hosts", "sessions"] },
-  "providers.snapshot": { required: ["providers"] },
-  "projects.snapshot": { required: ["projects", "resumableSessions"] },
+  "providers.snapshot": { required: ["catalogRevision", "providers"] },
+  "projects.snapshot": {
+    required: ["projects", "resumableSessions"],
+    optional: ["creation"],
+  },
+  "project.created": { required: ["requestId", "project"] },
   "session.created": {
     required: [
       "id",
@@ -109,6 +128,8 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
       "providerId",
       "launchProfileId",
       "modelId",
+      "permissionProfileId",
+      "toolsetId",
       "projectId",
       "requestId",
     ],
@@ -137,7 +158,7 @@ const EXPECTED_PAYLOAD_KEYS: Record<string, KeySpec> = {
   "approval.resolved": { required: ["approvalId", "decision", "resolvedBy"] },
   "session.completed": { required: ["summary", "changedFileCount", "testStatus"] },
   "session.failed": { required: ["reason", "changedFileCount"] },
-  error: { required: ["code", "message", "recoverable"] },
+  error: { required: ["code", "message", "recoverable"], optional: ["requestId"] },
   // -- Audit log (Phase 10) --------------------------------------------------
   "audit.snapshot": { required: ["events"] },
   "audit.event.created": { required: ["event"] },
@@ -174,6 +195,8 @@ const DESCRIPTOR_KEYS = [
   "warnings",
   "launchProfiles",
   "models",
+  "permissionProfiles",
+  "toolsets",
 ].sort();
 
 /**
@@ -265,17 +288,27 @@ const RESUME_DESCRIPTOR_KEYS = [
   "agentType",
   "updatedAt",
 ].sort();
+const PROJECT_CREATION_KEYS = ["providerIds", "maxNameLength"].sort();
 
 describe("projects.snapshot sanitization", () => {
   test("fixture carries only opaque project/resume metadata", () => {
     const fixture = JSON.parse(
       fs.readFileSync(path.join(FIXTURES_DIR, "projects.snapshot.json"), "utf8"),
-    ) as { payload: { projects: unknown[]; resumableSessions: unknown[] } };
+    ) as {
+      payload: {
+        projects: unknown[];
+        resumableSessions: unknown[];
+        creation?: unknown;
+      };
+    };
     for (const project of fixture.payload.projects) {
       assert.deepEqual(keysOf(project), PROJECT_DESCRIPTOR_KEYS);
     }
     for (const session of fixture.payload.resumableSessions) {
       assert.deepEqual(keysOf(session), RESUME_DESCRIPTOR_KEYS);
+    }
+    if (fixture.payload.creation !== null && fixture.payload.creation !== undefined) {
+      assert.deepEqual(keysOf(fixture.payload.creation), PROJECT_CREATION_KEYS);
     }
     const wire = JSON.stringify(fixture.payload).toLowerCase();
     for (const forbidden of [

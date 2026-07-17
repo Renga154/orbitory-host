@@ -1,7 +1,7 @@
 /**
- * Host-authoritative project and Codex resume catalog.
+ * Host-authoritative project and provider resume catalog.
  *
- * Paths and Codex thread ids remain in this process. The iOS client receives
+ * Paths and provider thread/session ids remain in this process. The iOS client receives
  * only random opaque handles plus short display labels. Configured projects
  * are always listed; Codex history is added only after explicit host-local
  * opt-in in orbitory.config.json.
@@ -16,13 +16,17 @@ import * as path from "node:path";
 import {
   agentConfigs,
   loadCodexHistoryDiscoveryConfig,
+  loadProjectCreationConfig,
   loadProviderDescriptors,
   refreshAgentConfigs,
+  type ProjectCreationConfig,
   type TerminalAgentConfig,
 } from "./agentConfig.js";
+import { queryClaudeSessions } from "./claudeHistory.js";
 import { buildSandboxExecProfile, wrapCommandForSandbox } from "./sandbox.js";
 import type {
   ProjectDescriptor,
+  ProjectCreationCapability,
   ProjectsSnapshotPayload,
   ProviderDescriptor,
   ResumableSessionDescriptor,
@@ -35,6 +39,9 @@ const APP_SERVER_THREAD_LIST_TIMEOUT_MS = 20_000;
 const MAX_APP_SERVER_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_DISPLAY_NAME_CHARS = 80;
 const MAX_RESUME_TITLE_CHARS = 120;
+export const PROJECT_NAME_MAX_LENGTH = 64;
+const CREATED_PROJECT_MARKER = ".orbitory-project.json";
+const CREATED_PROJECT_MARKER_MAX_BYTES = 1_024;
 const CODEX_HISTORY_DIRECTORIES = ["sessions", "archived_sessions"] as const;
 const CATALOG_ENV_ALLOWLIST = [
   "PATH",
@@ -63,15 +70,13 @@ interface CodexThreadRecord {
 interface ProjectLaunchTarget {
   providerId: string;
   workingDirectory: string;
-  kind: "configured" | "codex_history";
+  kind: "configured" | "codex_history" | "claude_history" | "created";
   configuredWorkingDirectory: string;
 }
 
-interface ResumeTarget {
-  projectId: string;
-  providerId: string;
-  codexThreadId: string;
-}
+type ResumeTarget =
+  | { kind: "codex"; projectId: string; providerId: string; codexThreadId: string }
+  | { kind: "claude"; projectId: string; providerId: string; claudeSessionId: string };
 
 interface ProjectRow {
   directory: string;
@@ -79,11 +84,23 @@ interface ProjectRow {
   warnings: Set<string>;
   risks: RiskLevel[];
   resumeCount: number;
+  preferredProviderId?: string;
 }
+
+interface CreatedProjectRecord {
+  directory: string;
+  preferredProviderId?: string;
+  requestId?: string;
+}
+
+export type ProjectCreationResult =
+  | { ok: true; project: ProjectDescriptor; snapshot: ProjectsSnapshotPayload }
+  | { ok: false; code: string; message: string };
 
 export interface ResolvedProjectLaunch {
   config: TerminalAgentConfig;
   codexThreadId?: string;
+  claudeSessionId?: string;
 }
 
 function opaqueId(prefix: "project" | "resume"): string {
@@ -136,7 +153,99 @@ function cloneSnapshot(snapshot: ProjectsSnapshotPayload): ProjectsSnapshotPaylo
       warnings: [...project.warnings],
     })),
     resumableSessions: snapshot.resumableSessions.map((session) => ({ ...session })),
+    ...(snapshot.creation
+      ? { creation: { ...snapshot.creation, providerIds: [...snapshot.creation.providerIds] } }
+      : { creation: null }),
   };
+}
+
+export function normalizeProjectName(value: string): string | undefined {
+  const normalized = value.normalize("NFC").trim();
+  const length = Array.from(normalized).length;
+  if (length < 1 || length > PROJECT_NAME_MAX_LENGTH) return undefined;
+  if (normalized === "." || normalized === ".." || normalized.startsWith(".")) return undefined;
+  if (normalized.endsWith(".") || normalized.endsWith(" ")) return undefined;
+  if (/[<>:"/\\|?*\u0000-\u001f\u007f]/u.test(normalized)) return undefined;
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(normalized)) return undefined;
+  return normalized;
+}
+
+function markerPath(directory: string): string {
+  return path.join(directory, CREATED_PROJECT_MARKER);
+}
+
+function readCreatedProjectMarker(
+  directory: string,
+): { preferredProviderId?: string; requestId?: string } | undefined {
+  const marker = markerPath(directory);
+  try {
+    const stat = fs.lstatSync(marker);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > CREATED_PROJECT_MARKER_MAX_BYTES) {
+      return undefined;
+    }
+    const raw = JSON.parse(fs.readFileSync(marker, "utf8")) as Record<string, unknown>;
+    if (raw["version"] !== 1 || raw["createdBy"] !== "Orbitory") return undefined;
+    const preferredProviderId = raw["preferredProviderId"];
+    const requestId = raw["requestId"];
+    return {
+      ...(typeof preferredProviderId === "string" && preferredProviderId.length <= 128
+        ? { preferredProviderId }
+        : {}),
+      ...(typeof requestId === "string" && /^[A-Za-z0-9._-]{1,128}$/u.test(requestId)
+        ? { requestId }
+        : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function listCreatedProjects(config: ProjectCreationConfig): CreatedProjectRecord[] {
+  const records: CreatedProjectRecord[] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(config.rootDirectory, { withFileTypes: true });
+  } catch {
+    return records;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    if (records.length >= config.maxProjects) break;
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const directory = path.join(config.rootDirectory, entry.name);
+    const marker = readCreatedProjectMarker(directory);
+    if (!marker) continue;
+    const canonical = canonicalDirectory(directory);
+    if (!canonical || path.dirname(canonical) !== config.rootDirectory) continue;
+    records.push({ directory: canonical, ...marker });
+  }
+  return records;
+}
+
+function creationProviders(config: ProjectCreationConfig): TerminalAgentConfig[] {
+  return config.providerIds.flatMap((providerId) => {
+    const provider = agentConfigs.get(providerId);
+    if (!provider) return [];
+    const supported =
+      (provider.agentType === "codex" && provider.io === "codex-jsonl") ||
+      (provider.agentType === "claudeCode" && provider.io === "stream-json");
+    return supported ? [provider] : [];
+  });
+}
+
+function creationCapability(config: ProjectCreationConfig | undefined): ProjectCreationCapability | null {
+  if (!config) return null;
+  const providerIds = creationProviders(config).map((provider) => provider.id);
+  return providerIds.length > 0 ? { providerIds, maxNameLength: PROJECT_NAME_MAX_LENGTH } : null;
+}
+
+function isRegisteredCreatedProject(directory: string, config: ProjectCreationConfig): boolean {
+  const canonical = canonicalDirectory(directory);
+  return (
+    canonical !== undefined &&
+    path.dirname(canonical) === config.rootDirectory &&
+    readCreatedProjectMarker(canonical) !== undefined
+  );
 }
 
 function safeKill(child: ChildProcess, detached: boolean): void {
@@ -423,12 +532,16 @@ export function queryCodexThreads(
 
 export class ProjectCatalog {
   private readonly projectIdsByDirectory = new Map<string, string>();
-  private readonly resumeIdsByThread = new Map<string, string>();
+  private readonly resumeIdsByProviderSession = new Map<string, string>();
   private launchTargets = new Map<string, Map<string, ProjectLaunchTarget>>();
   private resumeTargets = new Map<string, ResumeTarget>();
   private currentSnapshot: ProjectsSnapshotPayload = { projects: [], resumableSessions: [] };
   private refreshedAt = 0;
   private refreshPromise: Promise<ProjectsSnapshotPayload> | null = null;
+  private readonly creationRequests = new Map<
+    string,
+    { name: string; providerId: string; directory: string }
+  >();
 
   async snapshot(force = false): Promise<ProjectsSnapshotPayload> {
     if (!force && Date.now() - this.refreshedAt < CATALOG_CACHE_MS) {
@@ -444,6 +557,163 @@ export class ProjectCatalog {
     } finally {
       this.refreshPromise = null;
     }
+  }
+
+  async createProject(
+    requestId: string,
+    rawName: string,
+    providerId: string,
+  ): Promise<ProjectCreationResult> {
+    refreshAgentConfigs();
+    const config = loadProjectCreationConfig();
+    const capability = creationCapability(config);
+    if (!config || !capability) {
+      return {
+        ok: false,
+        code: "project_creation_disabled",
+        message: "Project creation is not enabled on this host.",
+      };
+    }
+    if (!capability.providerIds.includes(providerId)) {
+      return {
+        ok: false,
+        code: "project_provider_unavailable",
+        message: "The selected provider is not enabled for new projects.",
+      };
+    }
+    const name = normalizeProjectName(rawName);
+    if (!name) {
+      return {
+        ok: false,
+        code: "invalid_project_name",
+        message: `Project names must be 1-${PROJECT_NAME_MAX_LENGTH} characters and cannot contain path or reserved characters.`,
+      };
+    }
+
+    const registered = listCreatedProjects(config);
+    const persisted = registered.find((project) => project.requestId === requestId);
+    const previous = this.creationRequests.get(requestId);
+    if (previous && (previous.name !== name || previous.providerId !== providerId)) {
+      return {
+        ok: false,
+        code: "request_id_conflict",
+        message: "This project request id was already used with different values.",
+      };
+    }
+    if (
+      persisted &&
+      (path.basename(persisted.directory) !== name ||
+        persisted.preferredProviderId !== providerId)
+    ) {
+      return {
+        ok: false,
+        code: "request_id_conflict",
+        message: "This project request id was already used with different values.",
+      };
+    }
+
+    const target =
+      previous?.directory ?? persisted?.directory ?? path.join(config.rootDirectory, name);
+    if (path.dirname(target) !== config.rootDirectory) {
+      return { ok: false, code: "invalid_project_name", message: "Invalid project name." };
+    }
+
+    if (!previous) {
+      if (fs.existsSync(target)) {
+        const marker = readCreatedProjectMarker(target);
+        if (
+          !isRegisteredCreatedProject(target, config) ||
+          marker?.requestId !== requestId ||
+          marker.preferredProviderId !== providerId
+        ) {
+          return {
+            ok: false,
+            code: "project_already_exists",
+            message: "A project or folder with that name already exists.",
+          };
+        }
+      } else {
+        if (registered.length >= config.maxProjects) {
+          return {
+            ok: false,
+            code: "project_limit_reached",
+            message: "This host has reached its Orbitory-created project limit.",
+          };
+        }
+        let stagingDirectory: string | null = null;
+        let targetCreated = false;
+        try {
+          // Build the marker privately inside the authorized root. Reserve the
+          // final direct child with non-recursive mkdir (atomic EEXIST), then
+          // move only our marker into it. We never replace or follow a
+          // pre-existing path supplied by the phone.
+          stagingDirectory = fs.mkdtempSync(
+            path.join(config.rootDirectory, ".orbitory-create-"),
+          );
+          fs.chmodSync(stagingDirectory, 0o700);
+          fs.writeFileSync(
+            markerPath(stagingDirectory),
+            `${JSON.stringify({
+              version: 1,
+              createdBy: "Orbitory",
+              preferredProviderId: providerId,
+              requestId,
+            })}\n`,
+            { mode: 0o600, flag: "wx" },
+          );
+          fs.mkdirSync(target, { mode: 0o700 });
+          targetCreated = true;
+          fs.renameSync(markerPath(stagingDirectory), markerPath(target));
+          try {
+            fs.rmdirSync(stagingDirectory);
+          } catch {
+            // The empty private staging directory is best-effort cleanup.
+          }
+          stagingDirectory = null;
+        } catch {
+          if (stagingDirectory) {
+            try {
+              fs.rmSync(stagingDirectory, { recursive: true, force: true });
+            } catch {
+              // Best-effort cleanup of our own 0700 staging directory only.
+            }
+          }
+          if (targetCreated) {
+            try {
+              // Removes only an empty directory that this request reserved.
+              // If anything appeared inside it concurrently, preserve it.
+              fs.rmdirSync(target);
+            } catch {
+              // Preserve any concurrently populated directory.
+            }
+          }
+          return {
+            ok: false,
+            code: "project_creation_failed",
+            message: "The host could not create the project directory.",
+          };
+        }
+      }
+      this.creationRequests.set(requestId, { name, providerId, directory: target });
+    }
+
+    this.refreshedAt = 0;
+    const snapshot = await this.snapshot(true);
+    const canonicalTarget = canonicalDirectory(target);
+    const projectId = canonicalTarget
+      ? this.projectIdsByDirectory.get(canonicalTarget)
+      : undefined;
+    const project = projectId
+      ? snapshot.projects.find((candidate) => candidate.id === projectId)
+      : undefined;
+    if (!project) {
+      return {
+        ok: false,
+        code: "project_creation_failed",
+        message: "The project was created but could not be added to the catalog.",
+      };
+    }
+    return { ok: true, project, snapshot };
   }
 
   resolveLaunch(
@@ -462,7 +732,11 @@ export class ProjectCatalog {
     ) {
       return undefined;
     }
-    if (target.kind === "codex_history") {
+    if (
+      target.kind === "codex_history" ||
+      target.kind === "claude_history" ||
+      resumeId !== undefined
+    ) {
       const discovery = loadCodexHistoryDiscoveryConfig();
       if (
         !discovery ||
@@ -471,25 +745,37 @@ export class ProjectCatalog {
         return undefined;
       }
     }
-
-    let codexThreadId: string | undefined;
-    if (resumeId !== undefined) {
-      const resume = this.resumeTargets.get(resumeId);
+    if (target.kind === "created") {
+      const creation = loadProjectCreationConfig();
       if (
-        !resume ||
-        resume.projectId !== projectId ||
-        resume.providerId !== providerId ||
-        baseConfig.agentType !== "codex" ||
-        baseConfig.io !== "codex-jsonl"
+        !creation ||
+        !creation.providerIds.includes(providerId) ||
+        !isRegisteredCreatedProject(target.workingDirectory, creation)
       ) {
         return undefined;
       }
-      codexThreadId = resume.codexThreadId;
+    }
+
+    let codexThreadId: string | undefined;
+    let claudeSessionId: string | undefined;
+    if (resumeId !== undefined) {
+      const resume = this.resumeTargets.get(resumeId);
+      if (!resume || resume.projectId !== projectId || resume.providerId !== providerId) {
+        return undefined;
+      }
+      if (resume.kind === "codex") {
+        if (baseConfig.agentType !== "codex" || baseConfig.io !== "codex-jsonl") return undefined;
+        codexThreadId = resume.codexThreadId;
+      } else {
+        if (baseConfig.agentType !== "claudeCode" || baseConfig.io !== "stream-json") return undefined;
+        claudeSessionId = resume.claudeSessionId;
+      }
     }
 
     return {
       config: { ...baseConfig, workingDirectory: target.workingDirectory },
       ...(codexThreadId ? { codexThreadId } : {}),
+      ...(claudeSessionId ? { claudeSessionId } : {}),
     };
   }
 
@@ -501,11 +787,11 @@ export class ProjectCatalog {
     return id;
   }
 
-  private resumeIdForThread(threadId: string): string {
-    const existing = this.resumeIdsByThread.get(threadId);
+  private resumeIdForProviderSession(key: string): string {
+    const existing = this.resumeIdsByProviderSession.get(key);
     if (existing) return existing;
     const id = opaqueId("resume");
-    this.resumeIdsByThread.set(threadId, id);
+    this.resumeIdsByProviderSession.set(key, id);
     return id;
   }
 
@@ -555,6 +841,30 @@ export class ProjectCatalog {
       launchTargets.set(projectId, targets);
     }
 
+    const creation = loadProjectCreationConfig();
+    const createdProviders = creation ? creationProviders(creation) : [];
+    if (creation && createdProviders.length > 0) {
+      for (const created of listCreatedProjects(creation)) {
+        const [projectId, row] = ensureProject(created.directory);
+        row.warnings.add("created_by_orbitory");
+        if (created.preferredProviderId) {
+          row.preferredProviderId = created.preferredProviderId;
+        }
+        const targets = launchTargets.get(projectId) ?? new Map<string, ProjectLaunchTarget>();
+        for (const provider of createdProviders) {
+          row.providerIds.add(provider.id);
+          row.risks.push(descriptors.get(provider.id)?.riskLevel ?? "high");
+          targets.set(provider.id, {
+            providerId: provider.id,
+            workingDirectory: created.directory,
+            kind: "created",
+            configuredWorkingDirectory: provider.workingDirectory,
+          });
+        }
+        launchTargets.set(projectId, targets);
+      }
+    }
+
     const discovery = loadCodexHistoryDiscoveryConfig();
     if (discovery) {
       const template = agentConfigs.get(discovery.providerId);
@@ -590,8 +900,9 @@ export class ProjectCatalog {
           }
           launchTargets.set(projectId, targets);
 
-          const resumeId = this.resumeIdForThread(thread.id);
+          const resumeId = this.resumeIdForProviderSession(`codex:${template.id}:${thread.id}`);
           resumeTargets.set(resumeId, {
+            kind: "codex",
             projectId,
             providerId: template.id,
             codexThreadId: thread.id,
@@ -604,6 +915,54 @@ export class ProjectCatalog {
             agentType: "codex",
             updatedAt: new Date(thread.updatedAt * 1000).toISOString(),
           });
+        }
+
+        const claudeProviders = historyProviders.filter(
+          (provider) => provider.agentType === "claudeCode" && provider.io === "stream-json",
+        );
+        if (claudeProviders.length > 0) {
+          const sessions = queryClaudeSessions(discovery.maxSessions);
+          for (const provider of claudeProviders) {
+            for (const session of sessions) {
+              const directory = canonicalDirectory(session.cwd);
+              if (!directory) continue;
+              const [projectId, row] = ensureProject(directory);
+              row.warnings.add("claude_history_experimental");
+              row.warnings.add("broad_project_access");
+              row.resumeCount += 1;
+              row.providerIds.add(provider.id);
+              row.risks.push(descriptors.get(provider.id)?.riskLevel ?? "high");
+
+              const targets = launchTargets.get(projectId) ?? new Map<string, ProjectLaunchTarget>();
+              if (!targets.has(provider.id)) {
+                targets.set(provider.id, {
+                  providerId: provider.id,
+                  workingDirectory: directory,
+                  kind: "claude_history",
+                  configuredWorkingDirectory: provider.workingDirectory,
+                });
+              }
+              launchTargets.set(projectId, targets);
+
+              const resumeId = this.resumeIdForProviderSession(
+                `claude:${provider.id}:${session.id}`,
+              );
+              resumeTargets.set(resumeId, {
+                kind: "claude",
+                projectId,
+                providerId: provider.id,
+                claudeSessionId: session.id,
+              });
+              resumableSessions.push({
+                id: resumeId,
+                projectId,
+                providerId: provider.id,
+                title: session.title,
+                agentType: "claudeCode",
+                updatedAt: session.updatedAt,
+              });
+            }
+          }
         }
       }
     }
@@ -619,7 +978,13 @@ export class ProjectCatalog {
         hostId: os.hostname(),
         displayName: projectDisplayName(row.directory),
         providerIds,
-        defaultProviderId: startableProviderIds[0] ?? providerIds[0] ?? null,
+        defaultProviderId:
+          (row.preferredProviderId && startableProviderIds.includes(row.preferredProviderId)
+            ? row.preferredProviderId
+            : undefined) ??
+          startableProviderIds[0] ??
+          providerIds[0] ??
+          null,
         startable: startableProviderIds.length > 0,
         riskLevel: highestRisk(row.risks),
         warnings: Array.from(row.warnings),
@@ -630,7 +995,11 @@ export class ProjectCatalog {
     resumableSessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     this.launchTargets = launchTargets;
     this.resumeTargets = resumeTargets;
-    return { projects, resumableSessions };
+    return {
+      projects,
+      resumableSessions,
+      creation: creationCapability(creation),
+    };
   }
 }
 

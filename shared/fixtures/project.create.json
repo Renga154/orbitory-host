@@ -1,0 +1,11 @@
+{
+  "type": "project.create",
+  "version": 1,
+  "timestamp": "2026-07-14T08:30:00.000Z",
+  "sessionId": null,
+  "payload": {
+    "requestId": "create_project_fixture_001",
+    "name": "Aomori Apple LP",
+    "providerId": "claude-local"
+  }
+}

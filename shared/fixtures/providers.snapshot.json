@@ -4,6 +4,7 @@
   "timestamp": "2026-07-01T10:00:00.300Z",
   "sessionId": null,
   "payload": {
+    "catalogRevision": "pcat_0000000000000000",
     "providers": [
       {
         "id": "demo-terminal",
@@ -31,6 +32,30 @@
             "id": "default",
             "displayName": "Default",
             "isDefault": true
+          }
+        ],
+        "permissionProfiles": [
+          {
+            "id": "host-default",
+            "mode": "host_default",
+            "enforcement": "host_policy",
+            "isDefault": true,
+            "requiresStartConfirmation": true,
+            "riskLevel": "medium",
+            "warnings": ["provider_managed_controls"]
+          }
+        ],
+        "toolsets": [
+          {
+            "id": "none",
+            "includesMcp": false,
+            "includesSkills": false,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": true,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": []
           }
         ]
       },
@@ -60,6 +85,30 @@
             "id": "default",
             "displayName": "Default",
             "isDefault": true
+          }
+        ],
+        "permissionProfiles": [
+          {
+            "id": "host-default",
+            "mode": "host_default",
+            "enforcement": "host_policy",
+            "isDefault": true,
+            "requiresStartConfirmation": true,
+            "riskLevel": "medium",
+            "warnings": ["provider_managed_controls"]
+          }
+        ],
+        "toolsets": [
+          {
+            "id": "none",
+            "includesMcp": false,
+            "includesSkills": false,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": true,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": []
           }
         ]
       },
@@ -117,6 +166,61 @@
             "displayName": "Fable",
             "isDefault": false
           }
+        ],
+        "permissionProfiles": [
+          {
+            "id": "observe",
+            "mode": "observe",
+            "enforcement": "provider_policy",
+            "isDefault": false,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": ["agent_level_read_only"]
+          },
+          {
+            "id": "supervised",
+            "mode": "supervised",
+            "enforcement": "approval_bridge",
+            "isDefault": true,
+            "requiresStartConfirmation": true,
+            "riskLevel": "high",
+            "warnings": ["phone_approval_available"]
+          }
+        ],
+        "toolsets": [
+          {
+            "id": "none",
+            "includesMcp": false,
+            "includesSkills": false,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": true,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": []
+          },
+          {
+            "id": "project-skills",
+            "includesMcp": false,
+            "includesSkills": true,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": false,
+            "requiresStartConfirmation": false,
+            "riskLevel": "medium",
+            "warnings": ["skills_are_instructions", "project_contents_checked_at_launch"]
+          },
+          {
+            "id": "project-tools",
+            "includesMcp": true,
+            "includesSkills": false,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": false,
+            "requiresStartConfirmation": true,
+            "riskLevel": "high",
+            "warnings": ["mcp_tools_require_approval", "mcp_content_untrusted", "project_contents_checked_at_launch"]
+          }
         ]
       },
       {
@@ -162,6 +266,50 @@
             "id": "gpt-5.5",
             "displayName": "GPT-5.5",
             "isDefault": false
+          }
+        ],
+        "permissionProfiles": [
+          {
+            "id": "observe",
+            "mode": "observe",
+            "enforcement": "provider_policy",
+            "isDefault": false,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": ["agent_level_read_only"]
+          },
+          {
+            "id": "supervised",
+            "mode": "supervised",
+            "enforcement": "provider_policy",
+            "isDefault": true,
+            "requiresStartConfirmation": true,
+            "riskLevel": "high",
+            "warnings": ["provider_managed_approval"]
+          }
+        ],
+        "toolsets": [
+          {
+            "id": "none",
+            "includesMcp": false,
+            "includesSkills": false,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": true,
+            "requiresStartConfirmation": false,
+            "riskLevel": "low",
+            "warnings": []
+          },
+          {
+            "id": "project-skills",
+            "includesMcp": false,
+            "includesSkills": true,
+            "mcpServerCount": 0,
+            "skillCount": 0,
+            "isDefault": false,
+            "requiresStartConfirmation": false,
+            "riskLevel": "medium",
+            "warnings": ["skills_are_instructions", "project_contents_checked_at_launch"]
           }
         ]
       }

@@ -93,6 +93,29 @@ describe("buildClaudeArgv", () => {
     });
     assert.deepEqual(argv.slice(0, 4), ["--model", "sonnet", "--permission-mode", "plan"]);
   });
+
+  test("resumes a host-held Claude session instead of assigning a new session id", () => {
+    const argv = buildClaudeArgv(
+      { args: [] },
+      "new-session-id-must-not-be-used",
+      undefined,
+      undefined,
+      "private-claude-session-id",
+    );
+    assert.deepEqual(argv, [
+      "-p",
+      "--verbose",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--resume",
+      "private-claude-session-id",
+    ]);
+    assert.equal(argv.includes("--session-id"), false);
+    assert.equal(argv.includes("new-session-id-must-not-be-used"), false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -219,7 +242,7 @@ describe("parseClaudeStreamLine", () => {
 // ---------------------------------------------------------------------------
 
 describe("mapEventToEmissions: system/init", () => {
-  test("planning status + the [orbitory] claude session line", () => {
+  test("planning status + a path-free line that keeps the real Claude session id host-only", () => {
     const emissions = mapLine(
       JSON.stringify({ type: "system", subtype: "init", session_id: "abc-123", model: "claude-sonnet-4" }),
     );
@@ -232,8 +255,9 @@ describe("mapEventToEmissions: system/init", () => {
     assert.deepEqual(emissions[1], {
       type: "terminalLine",
       stream: "stdout",
-      text: "[orbitory] claude session abc-123 (model claude-sonnet-4)",
+      text: "[orbitory] claude session started (model claude-sonnet-4)",
     });
+    assert.equal(JSON.stringify(emissions).includes("abc-123"), false);
   });
 });
 
@@ -680,7 +704,7 @@ describe("extractTestCounts", () => {
 });
 
 describe("mapEventToEmissions: result", () => {
-  test("success → idle 'waiting' status + the turn-finished line with tokens/cost", () => {
+  test("success → turn-finished line before the idle 'waiting' boundary", () => {
     const emissions = mapLine(
       JSON.stringify({
         type: "result",
@@ -691,12 +715,12 @@ describe("mapEventToEmissions: result", () => {
         usage: { input_tokens: 120, output_tokens: 456 },
       }),
     );
-    assert.deepEqual(emissions[0], { type: "status", status: "idle", summary: WAITING_FOR_MESSAGE_SUMMARY });
-    assert.deepEqual(emissions[1], {
+    assert.deepEqual(emissions[0], {
       type: "terminalLine",
       stream: "stdout",
       text: "[orbitory] turn finished (tokens 120/456, cost $0.0345)",
     });
+    assert.deepEqual(emissions[1], { type: "status", status: "idle", summary: WAITING_FOR_MESSAGE_SUMMARY });
   });
 
   test("error → sessionFailed with a scrubbed reason", () => {

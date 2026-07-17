@@ -1,0 +1,20 @@
+{
+  "type": "project.created",
+  "version": 1,
+  "timestamp": "2026-07-14T08:30:00.100Z",
+  "sessionId": null,
+  "payload": {
+    "requestId": "create_project_fixture_001",
+    "project": {
+      "id": "project_fixture_created_001",
+      "hostId": "host_001",
+      "displayName": "Aomori Apple LP",
+      "providerIds": ["codex-local", "claude-local"],
+      "defaultProviderId": "claude-local",
+      "startable": true,
+      "riskLevel": "high",
+      "warnings": ["created_by_orbitory"],
+      "resumableSessionCount": 0
+    }
+  }
+}

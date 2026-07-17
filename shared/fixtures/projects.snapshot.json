@@ -9,12 +9,12 @@
         "id": "project_fixture_001",
         "hostId": "host_001",
         "displayName": "Orbitory",
-        "providerIds": ["codex-local"],
+        "providerIds": ["codex-local", "claude-local"],
         "defaultProviderId": "codex-local",
         "startable": true,
         "riskLevel": "high",
-        "warnings": ["codex_history_experimental", "broad_project_access"],
-        "resumableSessionCount": 1
+        "warnings": ["codex_history_experimental", "claude_history_experimental", "broad_project_access"],
+        "resumableSessionCount": 2
       }
     ],
     "resumableSessions": [
@@ -25,7 +25,19 @@
         "title": "Fix token refresh",
         "agentType": "codex",
         "updatedAt": "2026-07-01T09:55:00.000Z"
+      },
+      {
+        "id": "resume_fixture_002",
+        "projectId": "project_fixture_001",
+        "providerId": "claude-local",
+        "title": "Polish checkout recovery",
+        "agentType": "claudeCode",
+        "updatedAt": "2026-07-01T09:58:00.000Z"
       }
-    ]
+    ],
+    "creation": {
+      "providerIds": ["codex-local", "claude-local"],
+      "maxNameLength": 64
+    }
   }
 }

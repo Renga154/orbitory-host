@@ -18,7 +18,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const hostAgentDir = path.resolve(here, "..");
 const repoRoot = path.resolve(hostAgentDir, "..");
 const protectedRoot = fs.existsSync(path.join(repoRoot, "ios")) ? repoRoot : hostAgentDir;
-const localUserPath = ["/Users", "satourenware"].join("/");
+const localHomePath = path.resolve(os.homedir());
+const localUserName = os.userInfo().username;
 const oldProductName = ["Pocket", "Agent"].join(" ");
 const privateProgressDoc = ["docs", "progress.md"].join("/");
 const tempRoots: string[] = [];
@@ -67,6 +68,150 @@ function makeLoggedInClaudeBin(): string {
     { mode: 0o700 },
   );
   return fakeBin;
+}
+
+function makeTailscaleStartupHarness(): { binPath: string; capturePath: string } {
+  const packageRoot = makeTempDir();
+  const binDir = path.join(packageRoot, "bin");
+  const distDir = path.join(packageRoot, "dist");
+  const capturePath = path.join(packageRoot, "startup-env.json");
+  fs.mkdirSync(binDir);
+  fs.mkdirSync(distDir);
+  fs.copyFileSync(
+    path.join(hostAgentDir, "bin/orbitory-host.js"),
+    path.join(binDir, "orbitory-host.js"),
+  );
+  fs.writeFileSync(path.join(packageRoot, "package.json"), '{"type":"module"}\n');
+  fs.writeFileSync(
+    path.join(distDir, "index.js"),
+    [
+      'import { writeFileSync } from "node:fs";',
+      'const capturePath = process.env["ORBITORY_TEST_CAPTURE_PATH"];',
+      'if (!capturePath) throw new Error("Missing ORBITORY_TEST_CAPTURE_PATH");',
+      "writeFileSync(capturePath, JSON.stringify({",
+      '  advertisedHost: process.env["ORBITORY_ADVERTISED_HOST"] ?? null,',
+      '  pairingToken: process.env["ORBITORY_PAIRING_TOKEN"] ?? null,',
+      '  tlsEnabled: process.env["ORBITORY_TLS_ENABLED"] ?? null,',
+      '  tlsCertPath: process.env["ORBITORY_TLS_CERT_PATH"] ?? null,',
+      '  tlsKeyPath: process.env["ORBITORY_TLS_KEY_PATH"] ?? null,',
+      "}));",
+      "",
+    ].join("\n"),
+  );
+  return { binPath: path.join(binDir, "orbitory-host.js"), capturePath };
+}
+
+function makeRelayStartupHarness(options: { relayPolicySource?: string } = {}): {
+  binPath: string;
+  capturePath: string;
+  relayPolicyPath: string;
+} {
+  const packageRoot = makeTempDir();
+  const binDir = path.join(packageRoot, "bin");
+  const distDir = path.join(packageRoot, "dist");
+  const capturePath = path.join(packageRoot, "host-started.txt");
+  const relayPolicyPath = path.join(distDir, "relayPolicy.js");
+  fs.mkdirSync(binDir);
+  fs.mkdirSync(distDir);
+  fs.copyFileSync(
+    path.join(hostAgentDir, "bin/orbitory-host.js"),
+    path.join(binDir, "orbitory-host.js"),
+  );
+  fs.writeFileSync(path.join(packageRoot, "package.json"), '{"type":"module"}\n');
+  fs.writeFileSync(
+    relayPolicyPath,
+    options.relayPolicySource ??
+      [
+        'export const RELAY_RELEASE_EVIDENCE = { schemaVersion: 1, status: "no-go" };',
+        "export const RELAY_COMPILED_CRYPTOGRAPHIC_PROVIDER_ID = undefined;",
+        "export function evaluateRelayLaunchGate() {",
+        '  return { allowed: false, state: "blocked", blockCodes: ["cryptographic_provider_unapproved"] };',
+        "}",
+        "",
+      ].join("\n"),
+  );
+  fs.writeFileSync(
+    path.join(distDir, "index.js"),
+    [
+      'import { writeFileSync } from "node:fs";',
+      'const capturePath = process.env["ORBITORY_TEST_CAPTURE_PATH"];',
+      'if (!capturePath) throw new Error("Missing ORBITORY_TEST_CAPTURE_PATH");',
+      'writeFileSync(capturePath, "started");',
+      "",
+    ].join("\n"),
+  );
+  return { binPath: path.join(binDir, "orbitory-host.js"), capturePath, relayPolicyPath };
+}
+
+function makeFakeTailscaleBin(): { binDir: string; callsPath: string } {
+  const binDir = path.join(makeTempDir(), "bin");
+  const callsPath = path.join(binDir, "calls.log");
+  fs.mkdirSync(binDir);
+  fs.writeFileSync(
+    path.join(binDir, "tailscale"),
+    [
+      "#!/bin/sh",
+      'printf \'%s\\n\' "$*" > "$ORBITORY_TEST_TAILSCALE_CALLS"',
+      'printf \'%s\' "$ORBITORY_TEST_TAILSCALE_STDOUT"',
+      'printf \'%s\' "$ORBITORY_TEST_TAILSCALE_STDERR" >&2',
+      'exit "${ORBITORY_TEST_TAILSCALE_EXIT_CODE:-0}"',
+      "",
+    ].join("\n"),
+    { mode: 0o700 },
+  );
+  return { binDir, callsPath };
+}
+
+function runTailscaleStartup({
+  stdout,
+  stderr = "",
+  exitCode = 0,
+  advertisedHost,
+  tailscaleAvailable = true,
+}: {
+  stdout: string;
+  stderr?: string;
+  exitCode?: number;
+  advertisedHost?: string;
+  tailscaleAvailable?: boolean;
+}) {
+  const harness = makeTailscaleStartupHarness();
+  const fakeTailscale = tailscaleAvailable
+    ? makeFakeTailscaleBin()
+    : (() => {
+        const binDir = path.join(makeTempDir(), "bin");
+        fs.mkdirSync(binDir);
+        return { binDir, callsPath: path.join(binDir, "calls.log") };
+      })();
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    PATH: tailscaleAvailable
+      ? `${fakeTailscale.binDir}${path.delimiter}${process.env["PATH"] ?? ""}`
+      : fakeTailscale.binDir,
+    ORBITORY_TEST_CAPTURE_PATH: harness.capturePath,
+    ORBITORY_TEST_TAILSCALE_CALLS: fakeTailscale.callsPath,
+    ORBITORY_TEST_TAILSCALE_STDOUT: stdout,
+    ORBITORY_TEST_TAILSCALE_STDERR: stderr,
+    ORBITORY_TEST_TAILSCALE_EXIT_CODE: String(exitCode),
+    ORBITORY_PAIRING_TOKEN: "tailscale-test-token",
+    ORBITORY_TLS_ENABLED: "true",
+    ORBITORY_TLS_CERT_PATH: "/private/orbitory-test-cert.pem",
+    ORBITORY_TLS_KEY_PATH: "/private/orbitory-test-key.pem",
+  };
+  if (advertisedHost === undefined) {
+    delete env["ORBITORY_ADVERTISED_HOST"];
+  } else {
+    env["ORBITORY_ADVERTISED_HOST"] = advertisedHost;
+  }
+
+  const result = spawnSync(process.execPath, [harness.binPath, "--tailscale"], {
+    encoding: "utf8",
+    env,
+  });
+  const captured = fs.existsSync(harness.capturePath)
+    ? JSON.parse(fs.readFileSync(harness.capturePath, "utf8")) as Record<string, unknown>
+    : undefined;
+  return { result, captured, callsPath: fakeTailscale.callsPath };
 }
 
 function readPackageJson(): Record<string, unknown> {
@@ -138,6 +283,286 @@ describe("public npm package metadata", () => {
     assert.match(bin, /dist\/index\.js/);
     assert.equal(bin.includes("orbitory-dev-token"), false);
     assert.equal(bin.includes("orbitory-test-token"), false);
+  });
+
+  test("--help documents private Tailscale startup and its example", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const help = execFileSync(process.execPath, [binPath, "--help"], { encoding: "utf8" });
+
+    assert.match(help, /--tailscale/);
+    assert.match(help, /private Tailscale IPv4/);
+    assert.match(help, /Overrides ORBITORY_ADVERTISED_HOST for this launch/);
+    assert.match(help, /npx orbitory-host@latest --tailscale/);
+  });
+
+  test("--help labels Relay as security-gated instead of promising remote access", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const help = execFileSync(process.execPath, [binPath, "--help"], { encoding: "utf8" });
+
+    assert.match(help, /--relay/);
+    assert.match(help, /security-gated/i);
+    assert.match(help, /does not start a public Relay/i);
+  });
+
+  test("--relay fails before the host entrypoint can open a socket", () => {
+    const harness = makeRelayStartupHarness();
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ORBITORY_TEST_CAPTURE_PATH: harness.capturePath,
+        ORBITORY_RELAY_URL: "wss://relay.orbitory.example/connect",
+        ORBITORY_RELAY_CRYPTO_PROVIDER: "unreviewed-noise-provider",
+        ORBITORY_PAIRING_TOKEN: "relay-test-token",
+        ORBITORY_DISABLE_STATIC_TOKEN: "true",
+        ORBITORY_RELAY_THREAT_MODEL_REVIEWED: "true",
+        ORBITORY_RELAY_CRYPTO_REVIEWED: "true",
+        ORBITORY_RELAY_REPLAY_REVIEWED: "true",
+        ORBITORY_RELAY_PRIVACY_REVIEWED: "true",
+        ORBITORY_RELAY_EXPORT_REVIEWED: "true",
+        ORBITORY_RELAY_KILL_SWITCH_ENABLED: "true",
+        ORBITORY_RELAY_KEY_STORAGE_REVIEWED: "true",
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Relay security gate blocked startup/);
+    assert.match(result.stderr, /cryptographic_provider_unapproved/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay ignores runtime environment claims about release reviews and crypto selection", () => {
+    const harness = makeRelayStartupHarness({
+      relayPolicySource: [
+        'export const RELAY_RELEASE_EVIDENCE = { schemaVersion: 1, status: "no-go", threatModelReviewed: false, cryptographicReviewCompleted: false, replayAndOrderingReviewCompleted: false, privacyReviewCompleted: false, exportComplianceReviewed: false, keyStorageReviewed: false, interoperabilityReviewCompleted: false, revocationReviewCompleted: false, physical4GReviewCompleted: false, soak24HourReviewCompleted: false };',
+        "export const RELAY_COMPILED_CRYPTOGRAPHIC_PROVIDER_ID = undefined;",
+        "export function evaluateRelayLaunchGate(input) {",
+        "  const blockCodes = [];",
+        '  if (!input.releaseDecisionApproved) blockCodes.push("release_evidence_not_approved");',
+        '  if (!input.threatModelReviewed) blockCodes.push("threat_model_review_required");',
+        '  if (!input.cryptographicReviewCompleted) blockCodes.push("cryptographic_review_required");',
+        '  if (!input.physical4GReviewCompleted) blockCodes.push("physical_4g_review_required");',
+        '  if (!input.soak24HourReviewCompleted) blockCodes.push("soak_24_hour_review_required");',
+        '  if (!input.cryptographicProviderId) blockCodes.push("cryptographic_provider_unapproved");',
+        '  return { allowed: blockCodes.length === 0, state: blockCodes.length === 0 ? "ready" : "blocked", blockCodes };',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ORBITORY_TEST_CAPTURE_PATH: harness.capturePath,
+        ORBITORY_RELAY_URL: "wss://relay.orbitory.example/connect",
+        ORBITORY_RELAY_CRYPTO_PROVIDER: "runtime-claimed-provider",
+        ORBITORY_PAIRING_TOKEN: "relay-test-token",
+        ORBITORY_DISABLE_STATIC_TOKEN: "true",
+        ORBITORY_RELAY_THREAT_MODEL_REVIEWED: "true",
+        ORBITORY_RELAY_CRYPTO_REVIEWED: "true",
+        ORBITORY_RELAY_REPLAY_REVIEWED: "true",
+        ORBITORY_RELAY_PRIVACY_REVIEWED: "true",
+        ORBITORY_RELAY_EXPORT_REVIEWED: "true",
+        ORBITORY_RELAY_KILL_SWITCH_ENABLED: "true",
+        ORBITORY_RELAY_KEY_STORAGE_REVIEWED: "true",
+        ORBITORY_RELAY_PHYSICAL_4G_REVIEWED: "true",
+        ORBITORY_RELAY_SOAK_24_HOUR_REVIEWED: "true",
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /release_evidence_not_approved/);
+    assert.match(result.stderr, /threat_model_review_required/);
+    assert.match(result.stderr, /cryptographic_review_required/);
+    assert.match(result.stderr, /physical_4g_review_required/);
+    assert.match(result.stderr, /soak_24_hour_review_required/);
+    assert.match(result.stderr, /cryptographic_provider_unapproved/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay fails closed when compiled release evidence is missing", () => {
+    const harness = makeRelayStartupHarness({
+      relayPolicySource: [
+        "export function evaluateRelayLaunchGate() {",
+        '  return { allowed: true, state: "ready", blockCodes: [] };',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: { ...process.env, ORBITORY_TEST_CAPTURE_PATH: harness.capturePath },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /release evidence is missing or invalid/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay still fails closed if a future reviewed gate returns allowed", () => {
+    const harness = makeRelayStartupHarness({
+      relayPolicySource: [
+        'export const RELAY_RELEASE_EVIDENCE = { schemaVersion: 1, status: "go" };',
+        'export const RELAY_COMPILED_CRYPTOGRAPHIC_PROVIDER_ID = "reviewed-provider";',
+        "export function evaluateRelayLaunchGate() {",
+        '  return { allowed: true, state: "ready", blockCodes: [] };',
+        "}",
+        "",
+      ].join("\n"),
+    });
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ORBITORY_TEST_CAPTURE_PATH: harness.capturePath,
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Relay transport is not bundled in this release/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay fails closed when its security gate file is missing", () => {
+    const harness = makeRelayStartupHarness();
+    fs.rmSync(harness.relayPolicyPath);
+
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: { ...process.env, ORBITORY_TEST_CAPTURE_PATH: harness.capturePath },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Relay security gate is missing/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay fails closed when its security gate cannot be imported", () => {
+    const harness = makeRelayStartupHarness({ relayPolicySource: "export function {\n" });
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: { ...process.env, ORBITORY_TEST_CAPTURE_PATH: harness.capturePath },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Relay security gate could not be loaded/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay fails closed when its security gate export is invalid", () => {
+    const harness = makeRelayStartupHarness({
+      relayPolicySource: "export const evaluateRelayLaunchGate = null;\n",
+    });
+    const result = spawnSync(process.execPath, [harness.binPath, "--relay"], {
+      encoding: "utf8",
+      env: { ...process.env, ORBITORY_TEST_CAPTURE_PATH: harness.capturePath },
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Relay security gate is invalid/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(fs.existsSync(harness.capturePath), false);
+  });
+
+  test("--relay and --tailscale cannot be combined", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const result = spawnSync(process.execPath, [binPath, "--relay", "--tailscale"], {
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Choose either --relay or --tailscale/);
+  });
+
+  test("--tailscale starts with the private CLI IPv4 without changing token or TLS settings", () => {
+    const { result, captured, callsPath } = runTailscaleStartup({ stdout: "100.100.23.45\n" });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(callsPath, "utf8"), "ip -4\n");
+    assert.deepEqual(captured, {
+      advertisedHost: "100.100.23.45",
+      pairingToken: "tailscale-test-token",
+      tlsEnabled: "true",
+      tlsCertPath: "/private/orbitory-test-cert.pem",
+      tlsKeyPath: "/private/orbitory-test-key.pem",
+    });
+  });
+
+  test("--tailscale fails closed when the CLI is logged out even if an advertised host exists", () => {
+    const { result, captured } = runTailscaleStartup({
+      stdout: "",
+      stderr: "Logged out.\n",
+      exitCode: 1,
+      advertisedHost: "100.70.1.2",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Tailscale is running and logged in/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(captured, undefined);
+  });
+
+  test("--tailscale overrides an explicit advertised host with the detected tailnet IPv4", () => {
+    const { result, captured } = runTailscaleStartup({
+      stdout: "100.127.255.255\n",
+      advertisedHost: "203.0.113.42",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(captured?.advertisedHost, "100.127.255.255");
+  });
+
+  test("--tailscale rejects output with an extra newline", () => {
+    const { result, captured } = runTailscaleStartup({ stdout: "100.64.0.1\n\n" });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Expected exactly one IPv4 in 100\.64\.0\.0\/10/);
+    assert.equal(captured, undefined);
+  });
+
+  test("--tailscale rejects multiple IPv4 values instead of choosing one", () => {
+    const { result, captured } = runTailscaleStartup({
+      stdout: "100.64.0.1\n100.127.255.254\n",
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Expected exactly one IPv4 in 100\.64\.0\.0\/10/);
+    assert.equal(captured, undefined);
+  });
+
+  test("--tailscale accepts no malformed, non-CGNAT, hostname, or URL output", () => {
+    const rejectedOutputs = [
+      ["malformed IPv4", "100.64.0.999\n"],
+      ["below CGNAT", "100.63.255.255\n"],
+      ["above CGNAT", "100.128.0.0\n"],
+      ["LAN IPv4", "192.168.1.10\n"],
+      ["hostname", "orbitory-host.example.ts.net\n"],
+      ["URL", "https://orbitory-host.example.ts.net\n"],
+    ] as const;
+
+    for (const [label, stdout] of rejectedOutputs) {
+      const { result, captured } = runTailscaleStartup({ stdout });
+      assert.equal(result.status, 1, `${label} must be rejected`);
+      assert.match(result.stderr, /Expected exactly one IPv4 in 100\.64\.0\.0\/10/, label);
+      assert.equal(captured, undefined, `${label} must not start the host`);
+    }
+  });
+
+  test("--tailscale fails closed with a clear error when the CLI is unavailable", () => {
+    const { result, captured } = runTailscaleStartup({
+      stdout: "",
+      tailscaleAvailable: false,
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Tailscale CLI was not found on PATH/);
+    assert.match(result.stderr, /no host was started/);
+    assert.equal(captured, undefined);
   });
 
   test("--init-config writes a local starter config and does not require built dist files", () => {
@@ -512,6 +937,11 @@ describe("public npm package metadata", () => {
       "  eof { exit 6 }",
       "  timeout { exit 7 }",
       "}",
+      "expect {",
+      "  -re {Allow new project creation.*:} { send \"n\\r\" }",
+      "  eof { exit 8 }",
+      "  timeout { exit 9 }",
+      "}",
       "expect eof",
       "set result [wait]",
       "exit [lindex $result 3]",
@@ -565,9 +995,14 @@ describe("public npm package metadata", () => {
       "  timeout { exit 5 }",
       "}",
       "expect {",
-      "  -re {Enabled provider: Codex} {}",
+      "  -re {Allow new project creation.*:} { send \"n\\r\" }",
       "  eof { exit 7 }",
       "  timeout { exit 8 }",
+      "}",
+      "expect {",
+      "  -re {Enabled provider: Codex} {}",
+      "  eof { exit 9 }",
+      "  timeout { exit 10 }",
       "}",
       "expect eof",
       "set result [wait]",
@@ -763,6 +1198,121 @@ describe("public npm package metadata", () => {
     assert.ok(claudeId);
     assert.deepEqual(config.projectCatalog.codexHistory.additionalProviderIds, [claudeId]);
   });
+
+  test("new project creation is explicit, host-bounded, preserved, and revoked with providers", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const projectRoot = path.join(cwd, "new-projects");
+    fs.mkdirSync(projectRoot);
+    const codexBin = makeLoggedInCodexBin();
+    const claudeBin = makeLoggedInClaudeBin();
+    const env = {
+      ...process.env,
+      PATH: `${codexBin}${path.delimiter}${claudeBin}${path.delimiter}${process.env["PATH"] ?? ""}`,
+    };
+
+    execFileSync(
+      process.execPath,
+      [
+        binPath,
+        "--setup",
+        "codex",
+        "--allow-project-creation",
+        "--project-root",
+        projectRoot,
+        "--yes",
+      ],
+      { cwd, encoding: "utf8", env },
+    );
+    const configPath = path.join(cwd, "orbitory.config.json");
+    const configured = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: Array<{ id: string; agentType: string }>;
+      projectCatalog: {
+        creation: {
+          enabled: boolean;
+          rootDirectory: string;
+          providerIds: string[];
+          maxProjects: number;
+        };
+      };
+    };
+    const codexId = configured.agents.find((agent) => agent.agentType === "codex")?.id;
+    assert.ok(codexId);
+    assert.deepEqual(configured.projectCatalog.creation, {
+      enabled: true,
+      rootDirectory: fs.realpathSync(projectRoot),
+      providerIds: [codexId],
+      maxProjects: 100,
+    });
+
+    execFileSync(process.execPath, [binPath, "--setup", "codex", "--yes"], {
+      cwd,
+      encoding: "utf8",
+      env,
+    });
+    const preserved = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      projectCatalog: { creation: { providerIds: string[] } };
+    };
+    assert.deepEqual(preserved.projectCatalog.creation.providerIds, [codexId]);
+
+    execFileSync(
+      process.execPath,
+      [
+        binPath,
+        "--setup",
+        "claude",
+        "--allow-project-creation",
+        "--project-root",
+        projectRoot,
+        "--yes",
+      ],
+      { cwd, encoding: "utf8", env },
+    );
+    const shared = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      agents: Array<{ id: string; agentType: string }>;
+      projectCatalog: { creation: { providerIds: string[] } };
+    };
+    const claudeId = shared.agents.find((agent) => agent.agentType === "claudeCode")?.id;
+    assert.ok(claudeId);
+    assert.deepEqual(shared.projectCatalog.creation.providerIds, [codexId, claudeId]);
+
+    execFileSync(process.execPath, [binPath, "--remove-provider", codexId, "--yes"], {
+      cwd,
+      encoding: "utf8",
+    });
+    const afterCodexRemoval = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      projectCatalog: { creation: { providerIds: string[] } };
+    };
+    assert.deepEqual(afterCodexRemoval.projectCatalog.creation.providerIds, [claudeId]);
+
+    execFileSync(process.execPath, [binPath, "--remove-provider", claudeId, "--yes"], {
+      cwd,
+      encoding: "utf8",
+    });
+    const afterClaudeRemoval = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      projectCatalog?: unknown;
+    };
+    assert.equal(afterClaudeRemoval.projectCatalog, undefined);
+  });
+
+  test("project root cannot be supplied without explicit project-creation consent", () => {
+    const binPath = path.join(hostAgentDir, "bin/orbitory-host.js");
+    const cwd = makeTempDir();
+    const fakeBin = makeLoggedInCodexBin();
+    const result = spawnSync(
+      process.execPath,
+      [binPath, "--setup", "codex", "--project-root", cwd, "--yes"],
+      {
+        cwd,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${fakeBin}${path.delimiter}${process.env["PATH"] ?? ""}` },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /--project-root requires --allow-project-creation/);
+    assert.equal(fs.existsSync(path.join(cwd, "orbitory.config.json")), false);
+  });
 });
 
 describe("prepare-public-host-repo.mjs", () => {
@@ -805,7 +1355,12 @@ describe("prepare-public-host-repo.mjs", () => {
     const textFiles = copiedFiles.filter((file) => /\.(md|json|ts|js|mjs|example|yml|yaml)$/.test(file));
     for (const file of textFiles) {
       const text = fs.readFileSync(path.join(out, file), "utf8");
-      assert.equal(text.includes(localUserPath), false, `${file} contains a local absolute path`);
+      assert.equal(text.includes(localHomePath), false, `${file} contains the maintainer home path`);
+      assert.equal(
+        text.includes(`/Users/${localUserName}`) || text.includes(`/home/${localUserName}`),
+        false,
+        `${file} contains the maintainer username in an absolute path`,
+      );
       assert.equal(text.includes(oldProductName), false, `${file} contains the old product name`);
     }
   });

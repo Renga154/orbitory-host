@@ -50,6 +50,25 @@ process.stdin.on("end", () => {
     process.exitCode = 1;
     return;
   }
+  if (
+    scenario === "--scenario=recoverable-turn-failure" &&
+    resume &&
+    prompt === "transient failure"
+  ) {
+    emit({ type: "thread.started", thread_id: THREAD_ID });
+    emit({ type: "turn.started" });
+    emit({ type: "turn.failed", error: { message: "temporary model failure" } });
+    process.exitCode = 1;
+    return;
+  }
+  if (
+    scenario === "--scenario=recoverable-turn-failure" &&
+    resume &&
+    prompt === "abrupt failure"
+  ) {
+    process.exitCode = 1;
+    return;
+  }
   let reply;
   if (scenario === "--scenario=privacy" && !resume && prompt === "privacy") {
     emit({
@@ -92,13 +111,31 @@ process.stdin.on("end", () => {
     reply = "Queued second complete.";
   } else if (scenario === "--scenario=normal" && resume && prompt === "existing resume") {
     reply = "Existing thread resumed.";
+  } else if (
+    scenario === "--scenario=recoverable-turn-failure" &&
+    !resume &&
+    prompt === "establish recoverable thread"
+  ) {
+    reply = "Recoverable thread established.";
+  } else if (
+    scenario === "--scenario=recoverable-turn-failure" &&
+    resume &&
+    prompt === "retry after failure"
+  ) {
+    reply = "Recovered on the next turn.";
+  } else if (
+    scenario === "--scenario=recoverable-turn-failure" &&
+    resume &&
+    prompt === "retry after abrupt failure"
+  ) {
+    reply = "Recovered after the abrupt failure.";
   } else {
     process.stderr.write("fake Codex prompt rejected\n");
     process.exitCode = 65;
     return;
   }
 
-  if (scenario === "--scenario=normal") {
+  if (scenario === "--scenario=normal" || scenario === "--scenario=recoverable-turn-failure") {
     emit({ type: "thread.started", thread_id: THREAD_ID });
     emit({ type: "turn.started" });
     emit({

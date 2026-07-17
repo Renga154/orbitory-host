@@ -158,6 +158,55 @@ describe("WebSocket auth: successful handshake", () => {
     await client.waitForClose();
   });
 
+  test("a repeated client.hello cannot replace a query-authenticated token", async () => {
+    const client = connect(`${server.wsUrl}/ws?token=${encodeURIComponent(PAIRING_TOKEN!)}`);
+    await client.waitForOpen();
+    await client.waitFor((e) => e.type === "server.hello");
+
+    client.send({
+      type: "client.hello",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: { token: "different-token" },
+    });
+
+    const errorEnvelope = await client.waitFor((e) => e.type === "error");
+    const payload = errorEnvelope.payload as { code: string; recoverable: boolean };
+    assert.equal(payload.code, "unauthorized");
+    assert.equal(payload.recoverable, false);
+
+    const closeInfo = await client.waitForClose();
+    assert.equal(closeInfo.code, 4401);
+    assert.equal(closeInfo.reason, "unauthorized");
+  });
+
+  test("a repeated client.hello with the authenticated token remains a no-op", async () => {
+    const client = connect(`${server.wsUrl}/ws?token=${encodeURIComponent(PAIRING_TOKEN!)}`);
+    await client.waitForOpen();
+    await client.waitFor((e) => e.type === "server.hello");
+
+    client.send({
+      type: "client.hello",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: { token: PAIRING_TOKEN },
+    });
+    client.send({
+      type: "providers.request",
+      version: 1,
+      timestamp: new Date().toISOString(),
+      sessionId: null,
+      payload: {},
+    });
+
+    await client.waitFor((e) => e.type === "providers.snapshot");
+    assert.equal(client.socket.readyState, client.socket.OPEN);
+    client.close();
+    await client.waitForClose();
+  });
+
   test("correct token via first client.hello message (no query param) -> authenticates successfully", async () => {
     const client = connect(`${server.wsUrl}/ws`);
     await client.waitForOpen();

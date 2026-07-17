@@ -119,6 +119,38 @@ export interface ProviderModelOptionDescriptor {
   isDefault: boolean;
 }
 
+export type ProviderPermissionMode = "observe" | "supervised" | "host_default";
+export type ProviderPermissionEnforcement =
+  | "provider_policy"
+  | "approval_bridge"
+  | "host_policy";
+
+export interface ProviderPermissionProfileDescriptor {
+  id: string;
+  mode: ProviderPermissionMode;
+  enforcement: ProviderPermissionEnforcement;
+  isDefault: boolean;
+  requiresStartConfirmation: boolean;
+  riskLevel: RiskLevel;
+  warnings: string[];
+}
+
+/**
+ * Sanitized summary of one host-reviewed MCP/Skills bundle. The definitions,
+ * paths, commands, arguments, environment and credentials remain host-only.
+ */
+export interface ProviderToolsetDescriptor {
+  id: string;
+  includesMcp: boolean;
+  includesSkills: boolean;
+  mcpServerCount: number;
+  skillCount: number;
+  isDefault: boolean;
+  requiresStartConfirmation: boolean;
+  riskLevel: RiskLevel;
+  warnings: string[];
+}
+
 /**
  * A **sanitized** view of one host-configured provider, safe to send to the
  * (semi-trusted) iOS client. It carries only display/control metadata — never
@@ -156,6 +188,8 @@ export interface ProviderDescriptor {
   /** Provider-scoped allowlists. The client can select ids, never raw CLI flags. */
   launchProfiles: ProviderLaunchProfileDescriptor[];
   models: ProviderModelOptionDescriptor[];
+  permissionProfiles: ProviderPermissionProfileDescriptor[];
+  toolsets: ProviderToolsetDescriptor[];
 }
 
 /**
@@ -174,7 +208,7 @@ export interface ProjectDescriptor {
   resumableSessionCount: number;
 }
 
-/** Sanitized handle for a host-known Codex thread that can be resumed. */
+/** Sanitized handle for a supported host-known provider session that can be resumed. */
 export interface ResumableSessionDescriptor {
   id: string;
   projectId: string;
@@ -182,6 +216,12 @@ export interface ResumableSessionDescriptor {
   title: string;
   agentType: AgentType;
   updatedAt: string;
+}
+
+/** Sanitized opt-in capability for creating one project under a host-owned root. */
+export interface ProjectCreationCapability {
+  providerIds: string[];
+  maxNameLength: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +281,16 @@ export interface ChangedFile {
 export interface AgentSession {
   id: string;
   hostId: string;
+  /** Validated client launch id retained for reconnect correlation/idempotency. */
+  requestId?: string;
   /** Opaque project handle selected at launch. Optional for older/mock sessions. */
   projectId?: string;
   /** Host-configured provider and selected controls; opaque/sanitized for clients. */
   providerId?: string;
   launchProfileId?: string;
   modelId?: string;
+  permissionProfileId?: string;
+  toolsetId?: string;
   title: string;
   agentType: AgentType;
   /** Optional (Phase 16). Absent ⇒ unknown; clients show no badge. */
@@ -356,7 +400,7 @@ export interface SessionStartPayload {
   providerId?: string;
   /** Opaque host-issued project handle from `projects.snapshot`; never a path. */
   projectId?: string;
-  /** Opaque host-issued resumable-session handle; never a Codex thread id. */
+  /** Opaque host-issued resumable-session handle; never a provider thread/session id. */
   resumeId?: string;
   /** Provider-scoped ids from the latest providers.snapshot. */
   launchProfileId?: string;
@@ -368,6 +412,19 @@ export interface SessionStartPayload {
   initialPrompt?: string;
 }
 
+/**
+ * Strict real-provider launch contract. This separate message prevents an
+ * older host from silently ignoring access-control fields on session.start.
+ */
+export interface SessionLaunchPayload extends SessionStartPayload {
+  catalogRevision: string;
+  providerId: string;
+  launchProfileId: string;
+  modelId: string;
+  permissionProfileId: string;
+  toolsetId: string;
+}
+
 export type SessionRequestSummaryPayload = Record<string, never>;
 
 /** Client asks the server to (re-)send `providers.snapshot`. No fields. */
@@ -375,6 +432,13 @@ export type ProvidersRequestPayload = Record<string, never>;
 
 /** Client asks the server to refresh and resend `projects.snapshot`. */
 export type ProjectsRequestPayload = Record<string, never>;
+
+/** Creates one direct child of the host-configured project root. Never a path. */
+export interface ProjectCreatePayload {
+  requestId: string;
+  name: string;
+  providerId: string;
+}
 
 // ---------------------------------------------------------------------------
 // Client -> server messages (discriminated union)
@@ -404,6 +468,11 @@ export interface ClientSessionStartMessage extends Envelope<SessionStartPayload>
   type: "session.start";
 }
 
+export interface ClientSessionLaunchMessage extends Envelope<SessionLaunchPayload> {
+  type: "session.launch";
+  sessionId: null;
+}
+
 export interface ClientSessionRequestSummaryMessage
   extends Envelope<SessionRequestSummaryPayload> {
   type: "session.request_summary";
@@ -422,6 +491,11 @@ export interface ClientProjectsRequestMessage
   sessionId: null;
 }
 
+export interface ClientProjectCreateMessage extends Envelope<ProjectCreatePayload> {
+  type: "project.create";
+  sessionId: null;
+}
+
 export interface ClientAuditRequestMessage extends Envelope<AuditRequestPayload> {
   type: "audit.request";
   sessionId: null;
@@ -434,9 +508,11 @@ export type ClientMessage =
   | ClientApprovalDecisionMessage
   | ClientSessionStopMessage
   | ClientSessionStartMessage
+  | ClientSessionLaunchMessage
   | ClientSessionRequestSummaryMessage
   | ClientProvidersRequestMessage
   | ClientProjectsRequestMessage
+  | ClientProjectCreateMessage
   | ClientAuditRequestMessage;
 
 // ---------------------------------------------------------------------------
@@ -458,6 +534,7 @@ export interface SessionSnapshotPayload {
 
 /** Sanitized list of host-configured providers (Phase 6). */
 export interface ProvidersSnapshotPayload {
+  catalogRevision: string;
   providers: ProviderDescriptor[];
 }
 
@@ -465,6 +542,13 @@ export interface ProvidersSnapshotPayload {
 export interface ProjectsSnapshotPayload {
   projects: ProjectDescriptor[];
   resumableSessions: ResumableSessionDescriptor[];
+  /** Null/absent on hosts that did not explicitly enable project creation. */
+  creation?: ProjectCreationCapability | null;
+}
+
+export interface ProjectCreatedPayload {
+  requestId: string;
+  project: ProjectDescriptor;
 }
 
 /**
@@ -480,6 +564,8 @@ export interface SessionCreatedPayload {
   providerId?: string;
   launchProfileId?: string;
   modelId?: string;
+  permissionProfileId?: string;
+  toolsetId?: string;
   /** Echo of a valid `session.start.requestId`; correlation only. */
   requestId?: string;
   title: string;
@@ -576,6 +662,8 @@ export interface ErrorPayload {
   code: string;
   message: string;
   recoverable: boolean;
+  /** Echoed only after validating a client-supplied request id. */
+  requestId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +759,11 @@ export interface ServerProvidersSnapshotMessage
 export interface ServerProjectsSnapshotMessage
   extends Envelope<ProjectsSnapshotPayload> {
   type: "projects.snapshot";
+  sessionId: null;
+}
+
+export interface ServerProjectCreatedMessage extends Envelope<ProjectCreatedPayload> {
+  type: "project.created";
   sessionId: null;
 }
 
@@ -775,6 +868,7 @@ export type ServerMessage =
   | ServerSessionSnapshotMessage
   | ServerProvidersSnapshotMessage
   | ServerProjectsSnapshotMessage
+  | ServerProjectCreatedMessage
   | ServerSessionCreatedMessage
   | ServerChatMessageMessage
   | ServerSessionUpdatedMessage

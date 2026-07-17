@@ -45,7 +45,9 @@ export function buildCodexExecArgv(
   const extras = operatorExecArgs(config.args);
   const selectedArgs = [
     ...(selection?.modelCliValue ? ["--model", selection.modelCliValue] : []),
-    ...(selection?.intent === "plan" || selection?.intent === "review"
+    ...(selection?.permissionMode === "observe" ||
+    selection?.intent === "plan" ||
+    selection?.intent === "review"
       ? ["-c", 'sandbox_mode="read-only"']
       : []),
   ];

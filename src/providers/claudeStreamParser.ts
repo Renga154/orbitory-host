@@ -48,7 +48,8 @@ export const APPROVAL_PROMPT_TOOL_NAME = "mcp__orbitory__approval_prompt";
  *      `--allowedTools` — host-configured, never client-supplied).
  *   2. The host-authoritative stream flags:
  *      `-p --verbose --output-format stream-json --input-format stream-json
- *       --include-partial-messages --session-id <uuid>`.
+ *       --include-partial-messages`, followed by either `--session-id <uuid>`
+ *       for a new conversation or `--resume <host-held-id>` for a saved one.
  *   3. When an approval bridge is wired (Mechanism A):
  *      `--permission-prompt-tool <toolName> --mcp-config <path>
  *       --strict-mcp-config`.
@@ -60,10 +61,13 @@ export function buildClaudeArgv(
   sessionUuid: string,
   bridge?: { toolName: string; mcpConfigPath: string },
   selection?: ResolvedProviderSelection,
+  resumeSessionId?: string,
 ): string[] {
   const selectedArgs = [
     ...(selection?.modelCliValue ? ["--model", selection.modelCliValue] : []),
-    ...(selection?.intent === "plan" || selection?.intent === "review"
+    ...(selection?.permissionMode === "observe" ||
+    selection?.intent === "plan" ||
+    selection?.intent === "review"
       ? ["--permission-mode", "plan"]
       : []),
   ];
@@ -77,8 +81,9 @@ export function buildClaudeArgv(
     "--input-format",
     "stream-json",
     "--include-partial-messages",
-    "--session-id",
-    sessionUuid,
+    ...(resumeSessionId
+      ? ["--resume", resumeSessionId]
+      : ["--session-id", sessionUuid]),
   ];
   if (bridge) {
     argv.push(
@@ -575,7 +580,6 @@ const FAILURE_REASON_MAX_CHARS = 500;
 export function mapEventToEmissions(event: ClaudeStreamEvent, ctx: StreamMapContext): StreamEmission[] {
   switch (event.kind) {
     case "systemInit": {
-      const id = ctx.scrub(event.claudeSessionId) || "(unknown)";
       const model = ctx.scrub(event.model) || "(unknown)";
       return [
         {
@@ -586,7 +590,7 @@ export function mapEventToEmissions(event: ClaudeStreamEvent, ctx: StreamMapCont
             ja: "Claude Code セッションを開始しました。",
           },
         },
-        { type: "terminalLine", stream: "stdout", text: `[orbitory] claude session ${id} (model ${model})` },
+        { type: "terminalLine", stream: "stdout", text: `[orbitory] claude session started (model ${model})` },
       ];
     }
 
@@ -632,12 +636,14 @@ export function mapEventToEmissions(event: ClaudeStreamEvent, ctx: StreamMapCont
       const tokens = `${event.inputTokens ?? 0}/${event.outputTokens ?? 0}`;
       const cost = (event.costUsd ?? 0).toFixed(4);
       return [
-        { type: "status", status: "idle", summary: WAITING_FOR_MESSAGE_SUMMARY },
         {
           type: "terminalLine",
           stream: "stdout",
           text: `[orbitory] turn finished (tokens ${tokens}, cost $${cost})`,
         },
+        // Emit the final turn output before advertising idle. Consumers use
+        // idle as the turn-complete boundary and may immediately snapshot.
+        { type: "status", status: "idle", summary: WAITING_FOR_MESSAGE_SUMMARY },
       ];
     }
 

@@ -15,7 +15,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 
 import { DEMO_SESSIONS_ENABLED, HELLO_TIMEOUT_MS } from "./config.js";
-import { verifyPresentedToken } from "./auth.js";
+import { pairingTokensEqual, verifyPresentedToken } from "./auth.js";
 import {
   getAuditStore,
   recordAuthFailed,
@@ -24,7 +24,7 @@ import {
   recordSessionStopRequested,
 } from "./audit.js";
 import { redactToken } from "./logging.js";
-import { projectCatalog } from "./projectCatalog.js";
+import { projectCatalog, type ProjectCreationResult } from "./projectCatalog.js";
 import { sessionStore } from "./sessionStore.js";
 import type {
   ApprovalDecision,
@@ -47,6 +47,7 @@ const SERVER_CAPABILITIES = [
   "testResults",
   "auditLog",
   "projects",
+  "sessionControlsV1",
 ];
 
 function serverCapabilities(): string[] {
@@ -104,6 +105,7 @@ const NON_RECOVERABLE_ERROR_CODES = new Set([
   "invalid_payload",
   "unknown_event_type",
   "approval_not_found",
+  "idempotency_conflict",
 ]);
 
 function recoverableForCode(code: string): boolean {
@@ -115,9 +117,22 @@ function sendError(
   sessionId: string | null,
   code: string,
   message: string,
+  requestId?: string,
+  recoverableOverride?: boolean,
 ): void {
-  const payload: ErrorPayload = { code, message, recoverable: recoverableForCode(code) };
+  const payload: ErrorPayload = {
+    code,
+    message,
+    recoverable: recoverableOverride ?? recoverableForCode(code),
+    ...(requestId !== undefined ? { requestId } : {}),
+  };
   sendEnvelope(socket, makeEnvelope("error", sessionId, payload));
+}
+
+function validatedRequestId(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/u.test(value)
+    ? value
+    : undefined;
 }
 
 function extractTokenFromQuery(request: FastifyRequest): string | undefined {
@@ -133,6 +148,11 @@ function extractTokenFromQuery(request: FastifyRequest): string | undefined {
  */
 export interface ProjectCatalogSnapshotSource {
   snapshot(force?: boolean): Promise<ProjectsSnapshotPayload>;
+  createProject?(
+    requestId: string,
+    name: string,
+    providerId: string,
+  ): Promise<ProjectCreationResult>;
 }
 
 export function registerWebSocketRoute(
@@ -165,7 +185,13 @@ async function handleConnection(
 ): Promise<void> {
   const queryToken = extractTokenFromQuery(request);
 
-  const { token, clientId, timedOut } = await resolveToken(socket, queryToken);
+  const { token, clientId, timedOut, unsupportedVersion } = await resolveToken(socket, queryToken);
+
+  if (unsupportedVersion) {
+    sendError(socket, null, "unsupported_version", "Only protocol version 1 is supported.");
+    socket.close(4400, "unsupported_version");
+    return;
+  }
 
   // docs/protocol.md section 7 distinguishes "handshake_timeout" (no valid
   // client.hello arrived in time) from "unauthorized" (a hello did arrive,
@@ -213,6 +239,15 @@ async function handleConnection(
     return;
   }
 
+  // `verifyPresentedToken` cannot succeed without a concrete credential, but
+  // keep the transport boundary fail-closed if that invariant ever changes.
+  if (typeof token !== "string" || token.length === 0) {
+    recordAuthFailed("ws:verified_without_token");
+    sendError(socket, null, "unauthorized", "Invalid or missing pairing token.");
+    socket.close(CLOSE_CODE_UNAUTHORIZED, "unauthorized");
+    return;
+  }
+
   const authDetail = auth.kind === "device" ? `device ${auth.record.id}` : "static token";
   console.log(
     `[orbitory-host-agent] WS client authenticated (${authDetail}, token ${redactToken(
@@ -245,9 +280,7 @@ async function handleConnection(
   // snapshot on a successful handshake (and again on `providers.request`).
   sendEnvelope(
     socket,
-    makeEnvelope("providers.snapshot", null, {
-      providers: sessionStore.getProviderDescriptors(),
-    }),
+    makeEnvelope("providers.snapshot", null, sessionStore.getProviderCatalog()),
   );
 
   // Register the steady-state handlers before project history discovery. The
@@ -260,7 +293,7 @@ async function handleConnection(
   sessionStore.on("event", forward);
 
   socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
-    handleIncomingMessage(socket, raw, catalog);
+    handleIncomingMessage(socket, raw, catalog, token);
   });
 
   socket.on("close", () => {
@@ -291,6 +324,7 @@ interface TokenResolution {
   clientId: string | undefined;
   /** True only when no valid `client.hello` arrived before `HELLO_TIMEOUT_MS` elapsed. */
   timedOut: boolean;
+  unsupportedVersion: boolean;
 }
 
 /**
@@ -309,7 +343,12 @@ function resolveToken(
   queryToken: string | undefined,
 ): Promise<TokenResolution> {
   if (queryToken !== undefined) {
-    return Promise.resolve({ token: queryToken, clientId: undefined, timedOut: false });
+    return Promise.resolve({
+      token: queryToken,
+      clientId: undefined,
+      timedOut: false,
+      unsupportedVersion: false,
+    });
   }
 
   return new Promise((resolve) => {
@@ -319,7 +358,12 @@ function resolveToken(
       if (settled) return;
       settled = true;
       socket.off("message", onMessage);
-      resolve({ token: undefined, clientId: undefined, timedOut: true });
+      resolve({
+        token: undefined,
+        clientId: undefined,
+        timedOut: true,
+        unsupportedVersion: false,
+      });
     }, HELLO_TIMEOUT_MS);
 
     function onMessage(raw: Buffer | ArrayBuffer | Buffer[]): void {
@@ -362,10 +406,15 @@ function resolveToken(
       settled = true;
       clearTimeout(timer);
       socket.off("message", onMessage);
+      const version = (parsed as { version?: unknown }).version;
       resolve({
-        token: rawClientId !== undefined && clientId === undefined ? undefined : token,
+        token:
+          version === 1 && !(rawClientId !== undefined && clientId === undefined)
+            ? token
+            : undefined,
         clientId,
         timedOut: false,
+        unsupportedVersion: version !== 1,
       });
     }
 
@@ -377,6 +426,7 @@ function handleIncomingMessage(
   socket: WebSocket,
   raw: Buffer | ArrayBuffer | Buffer[],
   catalog: ProjectCatalogSnapshotSource,
+  authenticatedToken: string,
 ): void {
   try {
     const parsed: unknown = JSON.parse(raw.toString());
@@ -388,9 +438,15 @@ function handleIncomingMessage(
 
     const message = parsed as Partial<ClientMessage> & {
       type?: unknown;
+      version?: unknown;
       sessionId?: unknown;
       payload?: unknown;
     };
+
+    if (message.version !== 1) {
+      sendError(socket, null, "unsupported_version", "Only protocol version 1 is supported.");
+      return;
+    }
 
     const type = message.type;
     if (typeof type !== "string") {
@@ -398,11 +454,23 @@ function handleIncomingMessage(
       return;
     }
 
-    const sessionId =
-      typeof message.sessionId === "string" ? message.sessionId : null;
-    const payload = (message.payload ?? {}) as Record<string, unknown>;
+    if (
+      message.sessionId !== undefined &&
+      message.sessionId !== null &&
+      typeof message.sessionId !== "string"
+    ) {
+      sendError(socket, null, "invalid_payload", "sessionId must be a string or null.");
+      return;
+    }
+    const sessionId = typeof message.sessionId === "string" ? message.sessionId : null;
+    const rawPayload = message.payload ?? {};
+    if (typeof rawPayload !== "object" || rawPayload === null || Array.isArray(rawPayload)) {
+      sendError(socket, sessionId, "invalid_payload", "payload must be an object.");
+      return;
+    }
+    const payload = rawPayload as Record<string, unknown>;
 
-    dispatch(socket, type, sessionId, payload, catalog);
+    dispatch(socket, type, sessionId, payload, catalog, authenticatedToken);
   } catch (err) {
     console.error(
       "[orbitory-host-agent] Failed to parse incoming WS message:",
@@ -418,7 +486,9 @@ function dispatch(
   sessionId: string | null,
   payload: Record<string, unknown>,
   catalog: ProjectCatalogSnapshotSource,
+  authenticatedToken: string,
 ): void {
+  const correlatableRequestId = validatedRequestId(payload["requestId"]);
   try {
     switch (type) {
       case "chat.message": {
@@ -505,13 +575,19 @@ function dispatch(
         if (
           typeof hostId !== "string" ||
           typeof agentType !== "string" ||
-          typeof title !== "string"
+          typeof title !== "string" ||
+          title.trim().length === 0 ||
+          title.length > 240 ||
+          payload["catalogRevision"] !== undefined ||
+          payload["permissionProfileId"] !== undefined ||
+          payload["toolsetId"] !== undefined
         ) {
           sendError(
             socket,
             null,
             "invalid_payload",
-            "session.start requires payload.hostId, payload.agentType, and payload.title.",
+            "session.start is the legacy path and cannot carry access controls; use session.launch.",
+            correlatableRequestId,
           );
           return;
         }
@@ -519,18 +595,24 @@ function dispatch(
         // lookup key against the host's own orbitory.config.json allowlist
         // (see sessionStore.startSession / agentConfig.ts) — it is never
         // treated as a command or forwarded to a shell.
-        const providerId =
-          typeof payload["providerId"] === "string" ? payload["providerId"] : undefined;
-        const projectId =
-          typeof payload["projectId"] === "string" ? payload["projectId"] : undefined;
-        const resumeId =
-          typeof payload["resumeId"] === "string" ? payload["resumeId"] : undefined;
+        const rawProviderId = payload["providerId"];
+        const rawProjectId = payload["projectId"];
+        const rawResumeId = payload["resumeId"];
+        const providerId = typeof rawProviderId === "string" ? rawProviderId : undefined;
+        const projectId = typeof rawProjectId === "string" ? rawProjectId : undefined;
+        const resumeId = typeof rawResumeId === "string" ? rawResumeId : undefined;
         const rawLaunchProfileId = payload["launchProfileId"];
         const rawModelId = payload["modelId"];
         const launchProfileId =
           typeof rawLaunchProfileId === "string" ? rawLaunchProfileId : undefined;
         const modelId = typeof rawModelId === "string" ? rawModelId : undefined;
         if (
+          (rawProviderId !== undefined &&
+            (providerId === undefined || !/^[A-Za-z0-9._-]{1,64}$/u.test(providerId))) ||
+          (rawProjectId !== undefined &&
+            (projectId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(projectId))) ||
+          (rawResumeId !== undefined &&
+            (resumeId === undefined || !/^[A-Za-z0-9._-]{1,128}$/u.test(resumeId))) ||
           (rawLaunchProfileId !== undefined &&
             (launchProfileId === undefined ||
               !/^[A-Za-z0-9._-]{1,64}$/u.test(launchProfileId))) ||
@@ -541,7 +623,8 @@ function dispatch(
             socket,
             null,
             "invalid_payload",
-            "session.start launchProfileId/modelId must be provider-advertised opaque ids.",
+            "session.start provider/project/resume/control fields must be valid opaque ids.",
+            correlatableRequestId,
           );
           return;
         }
@@ -563,14 +646,25 @@ function dispatch(
         // first user chat message — for a terminal-backed session that means
         // the provider writes it to the child's stdin, exactly like any other
         // chat.message. It is data to the process, never a command.
+        const rawInitialPrompt = payload["initialPrompt"];
         const initialPrompt =
-          typeof payload["initialPrompt"] === "string" ? payload["initialPrompt"] : undefined;
+          typeof rawInitialPrompt === "string" ? rawInitialPrompt : undefined;
+        if (
+          rawInitialPrompt !== undefined &&
+          (initialPrompt === undefined || initialPrompt.length > 65_536)
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.start initialPrompt must be a string no longer than 65536 characters.",
+            correlatableRequestId,
+          );
+          return;
+        }
         // Phase 10: audit a real provider start request (mock starts are covered
         // by the derived session.started event).
-        if (providerId !== undefined) {
-          recordProviderStartRequested(providerId, agentType);
-        }
-        const created = sessionStore.startSession(
+        const result = sessionStore.startSession({
           hostId,
           agentType,
           title,
@@ -581,11 +675,155 @@ function dispatch(
           requestId,
           launchProfileId,
           modelId,
-        );
-        if (created === undefined && providerId !== undefined) {
-          // A provider-specific rejection (unknown/disabled id). Reason code only —
-          // never the hostile client fields, command, args, image, or env.
-          recordProviderStartRejected(providerId, "unknown_or_disabled");
+        });
+        if (
+          providerId !== undefined &&
+          (result.kind === "created" || (result.kind === "rejected" && result.freshAttempt))
+        ) {
+          recordProviderStartRequested(providerId, agentType);
+        }
+        if (result.kind === "rejected") {
+          if (providerId !== undefined && result.providerStartRejectedReason !== undefined) {
+            // Reason code only — never the hostile client fields, command, args, image, or env.
+            recordProviderStartRejected(providerId, result.providerStartRejectedReason);
+          }
+          sendError(
+            socket,
+            result.sessionId,
+            result.code,
+            result.message,
+            result.requestId,
+            result.recoverable,
+          );
+          return;
+        }
+        if (result.kind === "replayed") {
+          sendEnvelope(socket, sessionStore.makeSessionCreatedMessage(result.session));
+        }
+        return;
+      }
+
+      case "session.launch": {
+        const allowedKeys = new Set([
+          "catalogRevision",
+          "hostId",
+          "agentType",
+          "title",
+          "requestId",
+          "providerId",
+          "projectId",
+          "resumeId",
+          "launchProfileId",
+          "modelId",
+          "permissionProfileId",
+          "toolsetId",
+          "initialPrompt",
+        ]);
+        if (Object.keys(payload).some((key) => !allowedKeys.has(key))) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.launch contains an unsupported field.",
+            correlatableRequestId,
+          );
+          return;
+        }
+
+        const catalogRevision = payload["catalogRevision"];
+        const hostId = payload["hostId"];
+        const agentType = payload["agentType"];
+        const title = payload["title"];
+        const providerId = payload["providerId"];
+        const launchProfileId = payload["launchProfileId"];
+        const modelId = payload["modelId"];
+        const permissionProfileId = payload["permissionProfileId"];
+        const toolsetId = payload["toolsetId"];
+        const safeControlId = (value: unknown): value is string =>
+          typeof value === "string" && /^[A-Za-z0-9._-]{1,64}$/u.test(value);
+        if (
+          typeof catalogRevision !== "string" ||
+          !/^pcat_[a-f0-9]{16}$/u.test(catalogRevision) ||
+          typeof hostId !== "string" ||
+          typeof agentType !== "string" ||
+          typeof title !== "string" ||
+          title.trim().length === 0 ||
+          title.length > 240 ||
+          !safeControlId(providerId) ||
+          !safeControlId(launchProfileId) ||
+          !safeControlId(modelId) ||
+          !safeControlId(permissionProfileId) ||
+          !safeControlId(toolsetId)
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.launch requires a current catalog revision and valid provider control ids.",
+            correlatableRequestId,
+          );
+          return;
+        }
+
+        const projectId = payload["projectId"];
+        const resumeId = payload["resumeId"];
+        const requestId = payload["requestId"];
+        const initialPrompt = payload["initialPrompt"];
+        if (
+          (projectId !== undefined &&
+            (typeof projectId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/u.test(projectId))) ||
+          (resumeId !== undefined &&
+            (typeof resumeId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/u.test(resumeId))) ||
+          (requestId !== undefined &&
+            (typeof requestId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/u.test(requestId))) ||
+          (initialPrompt !== undefined &&
+            (typeof initialPrompt !== "string" || initialPrompt.length > 65_536))
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "session.launch optional fields are malformed.",
+            correlatableRequestId,
+          );
+          return;
+        }
+
+        const result = sessionStore.startSession({
+          catalogRevision,
+          strictControls: true,
+          hostId,
+          agentType,
+          title,
+          providerId,
+          launchProfileId,
+          modelId,
+          permissionProfileId,
+          toolsetId,
+          ...(typeof projectId === "string" ? { projectId } : {}),
+          ...(typeof resumeId === "string" ? { resumeId } : {}),
+          ...(typeof requestId === "string" ? { requestId } : {}),
+          ...(typeof initialPrompt === "string" ? { initialPrompt } : {}),
+        });
+        if (result.kind === "created" || (result.kind === "rejected" && result.freshAttempt)) {
+          recordProviderStartRequested(providerId, agentType);
+        }
+        if (result.kind === "rejected") {
+          if (result.providerStartRejectedReason !== undefined) {
+            recordProviderStartRejected(providerId, result.providerStartRejectedReason);
+          }
+          sendError(
+            socket,
+            result.sessionId,
+            result.code,
+            result.message,
+            result.requestId,
+            result.recoverable,
+          );
+          return;
+        }
+        if (result.kind === "replayed") {
+          sendEnvelope(socket, sessionStore.makeSessionCreatedMessage(result.session));
         }
         return;
       }
@@ -609,9 +847,7 @@ function dispatch(
         // (e.g. iOS pull-to-refresh). No session scope, no side effects.
         sendEnvelope(
           socket,
-          makeEnvelope("providers.snapshot", null, {
-            providers: sessionStore.getProviderDescriptors(),
-          }),
+          makeEnvelope("providers.snapshot", null, sessionStore.getProviderCatalog()),
         );
         return;
       }
@@ -633,6 +869,65 @@ function dispatch(
         return;
       }
 
+      case "project.create": {
+        const requestId = payload["requestId"];
+        const name = payload["name"];
+        const providerId = payload["providerId"];
+        const allowedKeys = new Set(["requestId", "name", "providerId"]);
+        if (
+          typeof requestId !== "string" ||
+          !/^[A-Za-z0-9._-]{1,128}$/u.test(requestId) ||
+          typeof name !== "string" ||
+          typeof providerId !== "string" ||
+          Object.keys(payload).some((key) => !allowedKeys.has(key))
+        ) {
+          sendError(
+            socket,
+            null,
+            "invalid_payload",
+            "project.create requires only payload.requestId, payload.name, and payload.providerId.",
+            correlatableRequestId,
+          );
+          return;
+        }
+        if (!catalog.createProject) {
+          sendError(
+            socket,
+            null,
+            "project_creation_disabled",
+            "Project creation is unavailable.",
+            correlatableRequestId,
+          );
+          return;
+        }
+        void catalog
+          .createProject(requestId, name, providerId)
+          .then((result) => {
+            if (!result.ok) {
+              sendError(socket, null, result.code, result.message, requestId);
+              return;
+            }
+            sendEnvelope(
+              socket,
+              makeEnvelope("project.created", null, {
+                requestId,
+                project: result.project,
+              }),
+            );
+            sendEnvelope(socket, makeEnvelope("projects.snapshot", null, result.snapshot));
+          })
+          .catch(() => {
+            sendError(
+              socket,
+              null,
+              "project_creation_failed",
+              "Unable to create the project.",
+              requestId,
+            );
+          });
+        return;
+      }
+
       case "audit.request": {
         // Phase 10: re-send the recent audit snapshot to just this socket.
         sendEnvelope(
@@ -645,8 +940,26 @@ function dispatch(
       }
 
       case "client.hello": {
-        // A second hello after the handshake window is a no-op; the
-        // connection is already authenticated.
+        const repeatedToken = payload["token"];
+        if (repeatedToken === undefined) {
+          return;
+        }
+        if (
+          typeof repeatedToken !== "string" ||
+          !pairingTokensEqual(repeatedToken, authenticatedToken)
+        ) {
+          recordAuthFailed("ws:hello_token_mismatch");
+          sendError(
+            socket,
+            null,
+            "unauthorized",
+            "A repeated client.hello token did not match the authenticated credential.",
+          );
+          socket.close(CLOSE_CODE_UNAUTHORIZED, "unauthorized");
+          return;
+        }
+        // A repeated hello is otherwise a no-op. It cannot replace the
+        // credential that authenticated this connection.
         return;
       }
 
@@ -670,6 +983,8 @@ function dispatch(
       sessionId,
       "internal_error",
       "Unexpected server error while handling message.",
+      correlatableRequestId,
+      false,
     );
   }
 }

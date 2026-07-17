@@ -228,10 +228,21 @@
       "agentType": "claudeCode",
       "io": "stream-json",
       "command": "node",
-      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000"],
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--wait-for-user", "--hang-on-user"],
       "workingDirectory": ".",
       "enabled": true,
       "maxRuntimeSeconds": 1
+    },
+    {
+      "id": "claude-stream-resumable",
+      "displayName": "Claude Code Stream Resumable (fake, test)",
+      "agentType": "claudeCode",
+      "io": "stream-json",
+      "command": "node",
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--wait-for-user", "--exit-after-turn"],
+      "workingDirectory": ".",
+      "enabled": true,
+      "maxRuntimeSeconds": 2
     },
     {
       "id": "claude-stream-stop-late-permission",
@@ -250,7 +261,7 @@
       "agentType": "claudeCode",
       "io": "stream-json",
       "command": "node",
-      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--linger-ms=15000", "--permission-on-sigterm"],
+      "args": ["../../scripts/fake-claude-code-stream.js", "--delay-ms=30", "--wait-for-user", "--hang-on-user", "--permission-on-sigterm"],
       "workingDirectory": ".",
       "enabled": true,
       "approvalTimeoutSeconds": 1,
